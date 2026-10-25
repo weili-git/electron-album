@@ -24,7 +24,7 @@
           <span class="pill">{{ detailCount }} 张</span>
         </div>
 
-        <PhotoGrid :photos="photos" :loading="photosLoading" />
+        <PhotoGrid :photos="photos" :loading="photosLoading" @open="openViewer" />
       </template>
 
       <template v-else>
@@ -48,6 +48,15 @@
       </template>
     </main>
 
+    <transition name="viewer">
+      <PhotoViewer
+        v-if="viewerIndex !== null && photos.length > 0"
+        :photos="photos"
+        :start-index="viewerIndex"
+        @close="viewerIndex = null"
+      />
+    </transition>
+
     <transition name="toast">
       <div v-if="message" class="toast">{{ message }}</div>
     </transition>
@@ -59,6 +68,7 @@ import { computed, onMounted, ref } from 'vue'
 import type { Album, Photo } from '../shared/types'
 import AlbumCard from './components/AlbumCard.vue'
 import PhotoGrid from './components/PhotoGrid.vue'
+import PhotoViewer from './components/PhotoViewer.vue'
 
 const albums = ref<Album[]>([])
 const loading = ref(true)
@@ -66,6 +76,7 @@ const busy = ref(false)
 const currentAlbum = ref<Album | null>(null)
 const photos = ref<Photo[]>([])
 const photosLoading = ref(false)
+const viewerIndex = ref<number | null>(null)
 const message = ref('')
 
 let messageTimer: number | undefined
@@ -127,6 +138,7 @@ async function handleAdd() {
 async function openAlbum(album: Album) {
   currentAlbum.value = album
   photos.value = []
+  viewerIndex.value = null
   photosLoading.value = true
   try {
     photos.value = await window.api.listPhotos(album.id)
@@ -138,9 +150,14 @@ async function openAlbum(album: Album) {
   }
 }
 
+function openViewer(index: number) {
+  viewerIndex.value = index
+}
+
 function backToLibrary() {
   currentAlbum.value = null
   photos.value = []
+  viewerIndex.value = null
   void loadAlbums()
 }
 

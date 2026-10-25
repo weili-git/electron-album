@@ -97,7 +97,8 @@ export async function scanAlbumPhotos(dir: string): Promise<Photo[]> {
     id: photoId(photo.path),
     name: photo.name,
     createdAt: photo.createdAt,
-    thumbUrl: makeThumbUrl(photoId(photo.path), 320, photo.mtimeMs)
+    thumbUrl: makeThumbUrl(photoId(photo.path), 320, photo.mtimeMs),
+    viewUrl: makeThumbUrl(photoId(photo.path), 1920, photo.mtimeMs)
   }))
 }
 

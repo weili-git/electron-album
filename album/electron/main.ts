@@ -2,6 +2,8 @@ import { app, BrowserWindow, ipcMain, dialog } from 'electron'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { addAlbums, getAlbums, listPhotos, loadLibrary, removeAlbum } from './library'
+import { readPhotoDetails } from './photoInfo'
+import { getPhotoFile } from './photos'
 import { installThumbProtocol, registerThumbScheme } from './thumbnails'
 
 const __filename = fileURLToPath(import.meta.url)
@@ -60,6 +62,13 @@ function registerIpc(): void {
   ipcMain.handle('album:photos', (_event, albumId: unknown) => {
     if (typeof albumId !== 'string') throw new Error('无效的相册 id')
     return listPhotos(albumId)
+  })
+
+  ipcMain.handle('photo:details', (_event, photoId: unknown) => {
+    if (typeof photoId !== 'string') throw new Error('无效的照片 id')
+    const file = getPhotoFile(photoId)
+    if (!file) return null
+    return readPhotoDetails(file)
   })
 }
 

@@ -19,7 +19,10 @@ export interface Photo {
   name: string
   /** 文件创建时间（取不到时用修改时间），用于默认排序 */
   createdAt: number
+  /** 网格缩略图（宽 320） */
   thumbUrl: string
+  /** 观赏窗口使用的高清预览（宽 1920，按需生成并缓存） */
+  viewUrl: string
 }
 
 export interface AddAlbumsResult {
@@ -30,6 +33,32 @@ export interface AddAlbumsResult {
   skipped: number
 }
 
+/** 观赏窗口翻转后展示的照片详情 */
+export interface PhotoDetails {
+  /** 原图像素尺寸（已按 EXIF 方向校正） */
+  width: number | null
+  height: number | null
+  /** 展示用格式名，如 JPEG / PNG / TIFF / NEF */
+  format: string
+  sizeBytes: number
+  /** 文件修改时间 */
+  modifiedAt: number
+  /** 拍摄时间：相机本地墙上时间的时间戳 */
+  takenAt: number | null
+  /** 相机型号（Make + Model 去重） */
+  camera: string | null
+  lens: string | null
+  focalLength: number | null
+  /** 35mm 等效焦距 */
+  focalLength35: number | null
+  aperture: number | null
+  /** 快门时间，单位秒 */
+  shutterSeconds: number | null
+  iso: number | null
+  /** 曝光补偿，单位 EV */
+  exposureBias: number | null
+}
+
 /** preload 暴露给渲染进程的 API */
 export interface AlbumApi {
   /** 打开选择目录对话框；取消时返回 null */
@@ -37,4 +66,6 @@ export interface AlbumApi {
   listAlbums(): Promise<Album[]>
   removeAlbum(id: string): Promise<Album[]>
   listPhotos(albumId: string): Promise<Photo[]>
+  /** 按需读取照片详情；照片已不在登记表中时返回 null */
+  getPhotoDetails(photoId: string): Promise<PhotoDetails | null>
 }

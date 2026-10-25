@@ -10,7 +10,7 @@ const SCHEME = 'thumb'
 const THUMB_HOST = 'photo'
 const CACHE_VERSION = 'v1'
 /** 缩略图宽度档位，避免任意宽度导致缓存膨胀 */
-const WIDTH_BUCKETS = [160, 320, 480, 640, 960]
+const WIDTH_BUCKETS = [160, 320, 480, 640, 960, 1280, 1920]
 const DEFAULT_WIDTH = 320
 const MAX_CONCURRENCY = 4
 

@@ -7,7 +7,17 @@
   </div>
 
   <div v-else class="photo-grid">
-    <figure v-for="photo in photos" :key="photo.id" class="photo">
+    <figure
+      v-for="(photo, index) in photos"
+      :key="photo.id"
+      class="photo"
+      tabindex="0"
+      role="button"
+      :aria-label="`查看 ${photo.name}`"
+      @click="$emit('open', index)"
+      @keydown.enter.prevent="$emit('open', index)"
+      @keydown.space.prevent="$emit('open', index)"
+    >
       <img
         :src="photo.thumbUrl"
         :alt="photo.name"
@@ -27,6 +37,8 @@ defineProps<{
   photos: Photo[]
   loading: boolean
 }>()
+
+defineEmits<{ open: [index: number] }>()
 
 function handleError(event: Event) {
   const image = event.currentTarget as HTMLImageElement
