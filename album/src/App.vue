@@ -1,19 +1,163 @@
 <template>
-  <div>
-    <button @click="handleSelectFolder">选择图片文件夹</button>
-    <p>选中路径：{{ folderPath }}</p>
+  <div class="app">
+    <header class="app-header">
+      <div class="brand">
+        <span class="brand__mark" aria-hidden="true" />
+        <div>
+          <h1 class="brand__title">本地相册</h1>
+          <p class="brand__subtitle">{{ subtitle }}</p>
+        </div>
+      </div>
+      <button class="btn btn--primary" :disabled="busy" @click="handleAdd">
+        {{ busy ? '正在扫描…' : '＋ 添加相册目录' }}
+      </button>
+    </header>
+
+    <main class="app-main">
+      <template v-if="currentAlbum">
+        <div class="album-bar">
+          <button class="btn btn--ghost" @click="backToLibrary">← 返回</button>
+          <div class="album-bar__title">
+            <h2>{{ currentAlbum.name }}</h2>
+            <span class="album-bar__path" :title="currentAlbum.path">{{ currentAlbum.path }}</span>
+          </div>
+          <span class="pill">{{ detailCount }} 张</span>
+        </div>
+
+        <PhotoGrid :photos="photos" :loading="photosLoading" />
+      </template>
+
+      <template v-else>
+        <div v-if="loading" class="state">正在扫描相册库…</div>
+
+        <div v-else-if="albums.length === 0" class="state state--empty">
+          <h2>还没有相册</h2>
+          <p>点击右上角「添加相册目录」，选择一个或多个包含照片的文件夹。</p>
+          <p class="state__hint">支持 JPG / PNG / WebP / GIF / TIFF，以及尼康 NEF。</p>
+        </div>
+
+        <div v-else class="album-grid">
+          <AlbumCard
+            v-for="album in albums"
+            :key="album.id"
+            :album="album"
+            @open="openAlbum"
+            @remove="handleRemove"
+          />
+        </div>
+      </template>
+    </main>
+
+    <transition name="toast">
+      <div v-if="message" class="toast">{{ message }}</div>
+    </transition>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
-const folderPath = ref('')
+import { computed, onMounted, ref } from 'vue'
+import type { Album, Photo } from '../shared/types'
+import AlbumCard from './components/AlbumCard.vue'
+import PhotoGrid from './components/PhotoGrid.vue'
 
-const handleSelectFolder = async () => {
-  // 这里 window.ipcRenderer 就是你 preload 暴露出来的
-  const path = await window.ipcRenderer.invoke('open-select-folder')
-  if (path) {
-    folderPath.value = path
+const albums = ref<Album[]>([])
+const loading = ref(true)
+const busy = ref(false)
+const currentAlbum = ref<Album | null>(null)
+const photos = ref<Photo[]>([])
+const photosLoading = ref(false)
+const message = ref('')
+
+let messageTimer: number | undefined
+
+const subtitle = computed(() => {
+  if (currentAlbum.value) return currentAlbum.value.path
+  if (loading.value) return '正在加载'
+  return `${albums.value.length} 个相册`
+})
+
+const detailCount = computed(() => {
+  if (!currentAlbum.value) return 0
+  return photosLoading.value ? currentAlbum.value.photoCount : photos.value.length
+})
+
+function showMessage(text: string) {
+  message.value = text
+  window.clearTimeout(messageTimer)
+  messageTimer = window.setTimeout(() => {
+    message.value = ''
+  }, 2600)
+}
+
+async function loadAlbums() {
+  loading.value = true
+  try {
+    albums.value = await window.api.listAlbums()
+  } catch (error) {
+    console.error(error)
+    showMessage('读取相册库失败')
+  } finally {
+    loading.value = false
   }
 }
+
+async function handleAdd() {
+  if (busy.value) return
+  busy.value = true
+  try {
+    const result = await window.api.addAlbums()
+    if (!result) return
+    albums.value = result.albums
+
+    if (result.added === 0) {
+      showMessage('所选目录已在相册库中')
+    } else if (result.skipped > 0) {
+      showMessage(`已添加 ${result.added} 个相册，跳过 ${result.skipped} 个重复目录`)
+    } else {
+      showMessage(`已添加 ${result.added} 个相册`)
+    }
+  } catch (error) {
+    console.error(error)
+    showMessage('添加相册失败')
+  } finally {
+    busy.value = false
+  }
+}
+
+async function openAlbum(album: Album) {
+  currentAlbum.value = album
+  photos.value = []
+  photosLoading.value = true
+  try {
+    photos.value = await window.api.listPhotos(album.id)
+  } catch (error) {
+    console.error(error)
+    showMessage('读取照片失败')
+  } finally {
+    photosLoading.value = false
+  }
+}
+
+function backToLibrary() {
+  currentAlbum.value = null
+  photos.value = []
+  void loadAlbums()
+}
+
+async function handleRemove(album: Album) {
+  const confirmed = window.confirm(
+    `从相册库移除「${album.name}」？\n\n只会移除库记录，不会删除磁盘上的任何文件。`
+  )
+  if (!confirmed) return
+
+  try {
+    albums.value = await window.api.removeAlbum(album.id)
+    showMessage('已从相册库移除')
+  } catch (error) {
+    console.error(error)
+    showMessage('移除失败')
+  }
+}
+
+onMounted(loadAlbums)
 </script>
