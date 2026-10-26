@@ -1,9 +1,9 @@
 var __defProp = Object.defineProperty;
 var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
 var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
-import { app, protocol, Menu, BrowserWindow, ipcMain, dialog } from "electron";
+import { app, protocol, net, Menu, BrowserWindow, ipcMain, dialog } from "electron";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { pathToFileURL, fileURLToPath } from "node:url";
 import fs from "node:fs/promises";
 import crypto from "node:crypto";
 import fsSync from "node:fs";
@@ -1620,6 +1620,9 @@ function photoId(filePath) {
 function makeThumbUrl(id, width, version, kind = "grid") {
   return `thumb://${THUMB_HOST$1}/${id}?w=${width}&v=${Math.round(version)}&p=${kind}`;
 }
+function makeOriginalUrl(id, version) {
+  return `thumb://${THUMB_HOST$1}/${id}?original=1&v=${Math.round(version)}`;
+}
 function getPhotoFile(id) {
   return registry.get(id);
 }
@@ -1784,7 +1787,8 @@ function toPhoto(photo) {
     name: photo.name,
     createdAt: photo.createdAt,
     thumbUrl: makeThumbUrl(id, 320, photo.mtimeMs, "grid"),
-    viewUrl: makeThumbUrl(id, 1920, photo.mtimeMs, "view")
+    viewUrl: makeThumbUrl(id, 1920, photo.mtimeMs, "view"),
+    originalUrl: makeOriginalUrl(id, photo.mtimeMs)
   };
 }
 function photosOfScan(scan) {
@@ -2417,6 +2421,9 @@ function installThumbProtocol() {
       if (!id) return notFound();
       const file = getPhotoFile(id);
       if (!file) return notFound();
+      if (url.searchParams.get("original") === "1") {
+        return serveOriginal(file);
+      }
       const width = pickWidth(url.searchParams.get("w"));
       const priority = pickPriority(url.searchParams.get("p"), width);
       const thumbPath = await ensureThumbnail(file, width, priority);
@@ -2438,6 +2445,41 @@ function installThumbProtocol() {
 }
 function notFound() {
   return new Response(null, { status: 404 });
+}
+const IMMUTABLE_CACHE = "public, max-age=31536000, immutable";
+const DIRECT_MIME = {
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".png": "image/png",
+  ".webp": "image/webp",
+  ".gif": "image/gif"
+};
+async function serveOriginal(file) {
+  const ext = path.extname(file.path).toLowerCase();
+  if (ext === ".nef") {
+    const preview = await extractThumbnail(file.path, { prefer: "largest" });
+    if (!preview.found || !preview.decodable) return notFound();
+    return binaryResponse(new Uint8Array(preview.data), preview.mimeType);
+  }
+  if (ext === ".tif" || ext === ".tiff") {
+    const png = await sharp(file.path).rotate().png().toBuffer();
+    return binaryResponse(new Uint8Array(png), "image/png");
+  }
+  const response = await net.fetch(pathToFileURL(file.path).toString());
+  if (!response.ok) return notFound();
+  const headers = new Headers(response.headers);
+  const mime = DIRECT_MIME[ext] ?? headers.get("Content-Type");
+  if (mime) headers.set("Content-Type", mime);
+  headers.set("Cache-Control", IMMUTABLE_CACHE);
+  return new Response(response.body, { status: response.status, headers });
+}
+function binaryResponse(data, mime) {
+  return new Response(data, {
+    headers: {
+      "Content-Type": mime,
+      "Cache-Control": IMMUTABLE_CACHE
+    }
+  });
 }
 function pickWidth(raw) {
   const requested = Number(raw);

@@ -23,6 +23,8 @@ export interface Photo {
   thumbUrl: string
   /** 观赏窗口使用的高清预览（宽 1920，按需生成并缓存） */
   viewUrl: string
+  /** 细看层使用的原图（或 RAW 内嵌预览），按原始像素提供 */
+  originalUrl: string
 }
 
 /** 后台重新扫描发现照片变化时，主进程推送给渲染进程 */

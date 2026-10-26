@@ -30,8 +30,9 @@
           type="button"
           :tabindex="flipped ? -1 : 0"
           :aria-label="`查看 ${currentPhoto.name} 的详细信息`"
-          title="点击翻转查看详细信息"
+          title="点击翻转查看详细信息；右键放大"
           @click="toggleFlip"
+          @contextmenu.prevent="openInspect"
         >
           <img
             :key="currentPhoto.id"
@@ -159,6 +160,14 @@
       <button
         class="viewer__flip"
         type="button"
+        title="放大查看 (右键 / Z)"
+        @click="openInspect"
+      >
+        放大
+      </button>
+      <button
+        class="viewer__flip"
+        type="button"
         :aria-pressed="flipped"
         :title="flipped ? '翻转回照片 (F)' : '翻转查看详细信息 (F)'"
         @click="toggleFlip"
@@ -166,12 +175,21 @@
         {{ flipped ? '返回' : '详情' }}
       </button>
     </footer>
+
+    <PhotoInspect
+      v-if="inspectPhoto"
+      :key="inspectPhoto.id"
+      :photo="inspectPhoto"
+      @close="closeInspect"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import type { Photo, PhotoDetails } from '../../shared/types'
+import { lockPageScroll } from '../composables/useScrollLock'
+import PhotoInspect from './PhotoInspect.vue'
 
 const props = defineProps<{
   photos: Photo[]
@@ -191,6 +209,8 @@ const failed = ref(false)
 const flipped = ref(false)
 const details = ref<PhotoDetails | null>(null)
 const detailsLoading = ref(false)
+/** 非 null 时细看层覆盖在观赏窗口上，本层不再处理滚轮和键盘 */
+const inspectPhoto = ref<Photo | null>(null)
 
 /** 本次观赏会话内的详情缓存，翻页来回不会重复读盘 */
 const detailsCache = new Map<string, PhotoDetails | null>()
@@ -199,6 +219,7 @@ let detailRequest = 0
 const currentPhoto = computed(() => props.photos[currentIndex.value])
 
 function close() {
+  inspectPhoto.value = null
   emit('close')
 }
 
@@ -212,12 +233,25 @@ function showPhoto() {
   overlay.value?.focus()
 }
 
+/** 右键 / 「放大」/ Z：进入独立的细看层，与翻页、翻转逻辑隔离 */
+function openInspect() {
+  if (!currentPhoto.value) return
+  if (flipped.value) showPhoto()
+  inspectPhoto.value = currentPhoto.value
+}
+
+function closeInspect() {
+  inspectPhoto.value = null
+  overlay.value?.focus()
+}
+
 function step(delta: number) {
   const next = currentIndex.value + delta
   if (next < 0 || next >= props.photos.length) return
   loaded.value = false
   failed.value = false
   flipped.value = false
+  inspectPhoto.value = null
   if (backFace.value) backFace.value.scrollTop = 0
   currentIndex.value = next
   void loadDetails(currentPhoto.value)
@@ -281,6 +315,9 @@ function canScrollDetails(deltaY: number): boolean {
 }
 
 function handleWheel(event: WheelEvent) {
+  // 细看层打开时不处理观赏窗口的滚轮翻页
+  if (inspectPhoto.value) return
+
   const back = backFace.value
   // 详情内容可以滚动时优先滚动内容，滚到边界再翻页
   if (
@@ -323,6 +360,9 @@ function prefetchAdjacent() {
 }
 
 function handleKeydown(event: KeyboardEvent) {
+  // 细看层自己处理键盘，避免 Esc/方向键同时作用到浏览层
+  if (inspectPhoto.value) return
+
   if (event.key === 'Escape') {
     event.preventDefault()
     if (flipped.value) {
@@ -339,6 +379,9 @@ function handleKeydown(event: KeyboardEvent) {
   } else if (event.key === 'f' || event.key === 'F' || event.key === 'i' || event.key === 'I') {
     event.preventDefault()
     toggleFlip()
+  } else if (event.key === 'z' || event.key === 'Z') {
+    event.preventDefault()
+    openInspect()
   } else if (
     (event.key === 'Enter' || event.key === ' ') &&
     document.activeElement === overlay.value
@@ -405,11 +448,10 @@ function formatBytes(bytes: number): string {
   return `${value.toFixed(digits)} ${units[index]}`
 }
 
-let previousOverflow = ''
+let releaseScroll: (() => void) | null = null
 
 onMounted(() => {
-  previousOverflow = document.body.style.overflow
-  document.body.style.overflow = 'hidden'
+  releaseScroll = lockPageScroll()
   window.addEventListener('keydown', handleKeydown)
   wheelTarget = overlay.value
   wheelTarget?.addEventListener('wheel', handleWheel, { passive: false })
@@ -419,7 +461,8 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
-  document.body.style.overflow = previousOverflow
+  releaseScroll?.()
+  releaseScroll = null
   window.removeEventListener('keydown', handleKeydown)
   wheelTarget?.removeEventListener('wheel', handleWheel)
 })

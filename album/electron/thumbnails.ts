@@ -1,8 +1,9 @@
-import { app, protocol } from 'electron'
+import { app, net, protocol } from 'electron'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import crypto from 'node:crypto'
 import os from 'node:os'
+import { pathToFileURL } from 'node:url'
 import sharp from 'sharp'
 import { extractThumbnail } from 'extract-raw-preview'
 import { getPhotoFile, type PhotoFile } from './photos'
@@ -155,6 +156,11 @@ export function installThumbProtocol(): void {
       const file = getPhotoFile(id)
       if (!file) return notFound()
 
+      // 细看层直接读取原图，不经过缩放缓存
+      if (url.searchParams.get('original') === '1') {
+        return serveOriginal(file)
+      }
+
       const width = pickWidth(url.searchParams.get('w'))
       const priority = pickPriority(url.searchParams.get('p'), width)
       const thumbPath = await ensureThumbnail(file, width, priority)
@@ -178,6 +184,55 @@ export function installThumbProtocol(): void {
 
 function notFound(): Response {
   return new Response(null, { status: 404 })
+}
+
+const IMMUTABLE_CACHE = 'public, max-age=31536000, immutable'
+
+/** Chromium 可直接解码的格式；其余格式需要转换后再返回 */
+const DIRECT_MIME: Record<string, string> = {
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.png': 'image/png',
+  '.webp': 'image/webp',
+  '.gif': 'image/gif'
+}
+
+/**
+ * 细看层 / 未来编辑层使用的原图。
+ * JPG/PNG/WebP/GIF 直接流式返回原文件；NEF 返回内嵌预览；TIFF 转成原始像素的 PNG。
+ */
+async function serveOriginal(file: PhotoFile): Promise<Response> {
+  const ext = path.extname(file.path).toLowerCase()
+
+  if (ext === '.nef') {
+    const preview = await extractThumbnail(file.path, { prefer: 'largest' })
+    if (!preview.found || !preview.decodable) return notFound()
+    return binaryResponse(new Uint8Array(preview.data), preview.mimeType)
+  }
+
+  if (ext === '.tif' || ext === '.tiff') {
+    // 浏览器不能直接显示 TIFF，按原始像素解码后转成 PNG
+    const png = await sharp(file.path).rotate().png().toBuffer()
+    return binaryResponse(new Uint8Array(png), 'image/png')
+  }
+
+  const response = await net.fetch(pathToFileURL(file.path).toString())
+  if (!response.ok) return notFound()
+
+  const headers = new Headers(response.headers)
+  const mime = DIRECT_MIME[ext] ?? headers.get('Content-Type')
+  if (mime) headers.set('Content-Type', mime)
+  headers.set('Cache-Control', IMMUTABLE_CACHE)
+  return new Response(response.body, { status: response.status, headers })
+}
+
+function binaryResponse(data: Uint8Array<ArrayBuffer>, mime: string): Response {
+  return new Response(data, {
+    headers: {
+      'Content-Type': mime,
+      'Cache-Control': IMMUTABLE_CACHE
+    }
+  })
 }
 
 function pickWidth(raw: string | null): number {

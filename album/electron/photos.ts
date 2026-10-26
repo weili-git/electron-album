@@ -59,6 +59,11 @@ export function makeThumbUrl(
   return `thumb://${THUMB_HOST}/${id}?w=${width}&v=${Math.round(version)}&p=${kind}`
 }
 
+/** 细看层直接使用原图；NEF/TIFF 由缩略图协议转换成浏览器可显示的内容 */
+export function makeOriginalUrl(id: string, version: number): string {
+  return `thumb://${THUMB_HOST}/${id}?original=1&v=${Math.round(version)}`
+}
+
 export function getPhotoFile(id: string): PhotoFile | undefined {
   return registry.get(id)
 }
@@ -288,7 +293,8 @@ function toPhoto(photo: PhotoFile): Photo {
     name: photo.name,
     createdAt: photo.createdAt,
     thumbUrl: makeThumbUrl(id, 320, photo.mtimeMs, 'grid'),
-    viewUrl: makeThumbUrl(id, 1920, photo.mtimeMs, 'view')
+    viewUrl: makeThumbUrl(id, 1920, photo.mtimeMs, 'view'),
+    originalUrl: makeOriginalUrl(id, photo.mtimeMs)
   }
 }
 
