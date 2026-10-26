@@ -1,10 +1,20 @@
-import { app, BrowserWindow, ipcMain, dialog } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, Menu } from 'electron'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { addAlbums, getAlbums, listPhotos, loadLibrary, removeAlbum } from './library'
+import {
+  addAlbums,
+  getAlbumStats,
+  getAlbums,
+  listPhotos,
+  loadLibrary,
+  removeAlbum,
+  setPhotosUpdatedHandler
+} from './library'
+import { flushExifCacheSync } from './exifStats'
 import { readPhotoDetails } from './photoInfo'
 import { getPhotoFile } from './photos'
-import { installThumbProtocol, registerThumbScheme } from './thumbnails'
+import { flushScanCacheSync, loadScanCache } from './scanCache'
+import { installThumbProtocol, registerThumbScheme, setThumbnailScope } from './thumbnails'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -22,6 +32,7 @@ const createWindow = () => {
     minHeight: 520,
     title: '本地相册',
     backgroundColor: '#141416',
+    autoHideMenuBar: true,
     webPreferences: {
       // package.json 中 "type": "module"，preload 会被编译为 preload.mjs
       preload: path.join(__dirname, 'preload.mjs'),
@@ -36,7 +47,6 @@ const createWindow = () => {
   if (process.env.VITE_DEV_SERVER_URL) {
     // 开发环境：vite-plugin-electron 注入的开发服务器地址
     win.loadURL(process.env.VITE_DEV_SERVER_URL)
-    win.webContents.openDevTools()
   } else {
     // 生产环境：vite build 输出到 dist/index.html
     win.loadFile(path.join(__dirname, '../dist/index.html'))
@@ -70,13 +80,45 @@ function registerIpc(): void {
     if (!file) return null
     return readPhotoDetails(file)
   })
+
+  // 渲染进程切换视图时通知主进程，取消上一视图排队中的缩略图任务
+  ipcMain.handle('thumb:set-scope', (_event, albumPath: unknown) => {
+    if (albumPath !== null && typeof albumPath !== 'string') {
+      throw new Error('无效的相册路径')
+    }
+    setThumbnailScope(albumPath)
+  })
+
+  ipcMain.handle('album:stats', (event, albumId: unknown) => {
+    if (typeof albumId !== 'string') throw new Error('无效的相册 id')
+    const sender = event.sender
+    return getAlbumStats(albumId, (processed, total) => {
+      if (!sender.isDestroyed()) {
+        sender.send('album:stats-progress', { albumId, processed, total })
+      }
+    })
+  })
 }
 
 app.whenReady().then(async () => {
-  await loadLibrary()
+  // 移除 Electron 默认菜单（File/Edit/View/…），界面更简洁
+  Menu.setApplicationMenu(null)
+  await Promise.all([loadLibrary(), loadScanCache()])
   installThumbProtocol()
   registerIpc()
   createWindow()
+
+  // 后台重扫发现变化时推送给渲染进程
+  setPhotosUpdatedHandler((albumId, photos) => {
+    if (win && !win.isDestroyed()) {
+      win.webContents.send('album:photos-updated', { albumId, photos })
+    }
+  })
+})
+
+app.on('before-quit', () => {
+  flushScanCacheSync()
+  flushExifCacheSync()
 })
 
 app.on('activate', () => {

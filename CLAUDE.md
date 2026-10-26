@@ -33,6 +33,7 @@ npm run build            # 类型检查 + 构建 + electron-builder 打包
 7. 扫描范围为目录顶层，不递归；后续增加递归开关（TODO）。
 8. 照片默认按文件创建时间倒序（`birthtimeMs`，取不到时回退 `mtimeMs`）；后续支持多种排序策略（TODO）。
 9. 相册支持从库中移除（只移除记录，不删除磁盘文件）。
+10. 相册顶部「统计」按钮打开 `AlbumStatsPanel.vue`：按需读取 EXIF，统计焦距、光圈、快门、ISO、拍摄月份与时段，并显示拍摄时间范围；首次读取显示进度，之后命中缓存。
 
 ## 支持的图片格式
 
@@ -40,12 +41,22 @@ npm run build            # 类型检查 + 构建 + electron-builder 打包
 - 尼康 RAW：NEF。sharp 不能解码 NEF，使用 `extract-raw-preview` 提取内嵌 JPEG 预览，再交给 sharp 缩放。
 - EXIF 缺失的测试图片允许存在，字段为空时忽略，不阻塞展示。
 
+## 扫描缓存与增量刷新
+
+- 扫描结果持久化于 `app.getPath('userData')/scan-cache.json`（`electron/scanCache.ts`）：记录目录 mtime、照片名、创建时间、mtime、大小；照片真实路径由“相册目录 + 文件名”还原，不重复存储。
+- 打开相册时先返回缓存，界面立即渲染；`revalidateAlbum` 在后台检查目录签名并重扫，发现变化时通过 `album:photos-updated` IPC 推送给渲染进程。缓存 5 分钟内且目录 mtime 未变则跳过重扫。
+- 目录 mtime 只能感知增删/改名，感知不到文件内容原地修改；后者依赖 5 分钟 TTL 的后台重扫兜底。缩略图 URL 的 `v` 参数会随重扫后的 mtime 更新。
+- 相册库首页用目录签名判断：签名未变直接读缓存，只有 mtime 变化或缓存缺失才同步重扫该相册。首页只计算“张数 + 前 3 张封面”，不还原、不登记整本相册的照片，因此 `getAlbums` 开销与相册数量相关，不再随照片总数线性增长；整本还原发生在打开相册时。
+- 暂不使用 better-sqlite3：当前 Electron 30 内置 Node 20，而安装的 better-sqlite3 v13 要求 Node 22+，加载会崩溃；后续升级 Electron 后再考虑迁移 SQLite。
+
 ## 缩略图实现
 
-- 自定义协议 `thumb://photo/<id>?w=<width>&v=<mtime>`：主进程按 id 从扫描登记表解析真实路径，不向渲染进程暴露路径，也不通过 IPC 传图片数据。
+- 自定义协议 `thumb://photo/<id>?w=<width>&v=<mtime>&p=<view|grid|cover>`：主进程按 id 从扫描登记表解析真实路径，不向渲染进程暴露路径，也不通过 IPC 传图片数据。`p` 只影响生成优先级；没有 `p` 时按宽度回退。
 - 缓存位置 `app.getPath('userData')/thumbnails/`，缓存 key 包含路径、mtime、大小、宽度档位与版本号；URL 带 mtime 版本号绕过浏览器缓存。
-- 宽度档位 160/320/480/640/960/1280/1920；网格用 320，封面用 480，观赏窗口用 1920。sharp 并发限制为 4，同一 key 的并发生成会去重。
-- `Photo` 同时返回 `thumbUrl`（网格）与 `viewUrl`（观赏窗口）；两者都走同一个 `thumb://` 协议，只是宽度参数不同。
+- 宽度档位 160/320/480/640/960/1280/1920；网格用 320，封面用 480，观赏窗口用 1920。并发生成上限为 `max(4, min(8, CPU 并行度))`；队列按 `view > grid > cover` 三级 FIFO 取任务，观赏窗口不会被网格或封面阻塞。同一 key 的并发生成会去重。`sharp.concurrency(1)` 避免与外部并发叠加造成 CPU 超订。
+- 渲染进程切换视图时通过 `thumb:set-scope` IPC 告知主进程当前相册目录（首页为 `null`）：排队中的旧视图任务会被取消（返回 404），避免浏览大相册或相册库后，遗留的缩略图任务拖慢随后打开的小相册。已在生成中的任务（最多并发数个）无法中断，但会在一个任务时长内结束。
+- 照片网格使用固定方格虚拟滚动：按容器宽度计算列数与格子尺寸，只渲染可视区上下各 3 行；`.photo` 绝对定位，`.photo-grid` 高度按总行数内联设置。列宽/间距由 CSS 变量 `--photo-min-cell` / `--photo-gap` 提供（680px 媒体查询切换），PhotoGrid 读取后计算，断点只维护一处。
+- `Photo` 同时返回 `thumbUrl`（网格，`p=grid`）与 `viewUrl`（观赏窗口，`p=view`）；封面 URL 用 `p=cover`。三者都走同一个 `thumb://` 协议，只是宽度与优先级参数不同。
 - `img-src` CSP 已包含 `thumb:`。
 
 ## 照片详情（观赏窗口背面）
@@ -58,18 +69,32 @@ npm run build            # 类型检查 + 构建 + electron-builder 打包
 - 无 EXIF 的图片只显示图像信息并提示"没有拍摄信息"；读取失败不阻塞看图。
 - `exifr` 为纯 JS，直接打包进主进程；sharp / extract-raw-preview 仍为 external。
 
+## EXIF 统计（相册视图）
+
+- 主进程模块 `electron/exifStats.ts`，UI 为 `src/components/AlbumStatsPanel.vue`，由相册顶部「统计」按钮打开；`album:stats` IPC 按需触发，**不在扫描或打开相册时预读**。
+- `exifr` 只 `pick` 统计需要的字段（`FocalLength`、`FocalLengthIn35mmFormat`、`FNumber`、`ExposureTime`、`ISO`/`ISOSpeedRatings`、`DateTimeOriginal`/`CreateDate`），并关闭 `translateValues` / `reviveValues`，统一由 `electron/exif.ts` 的 `toNumber`、`parseExifDate` 解析。
+- 逐张读取并发 4；单张解析失败按“没有拍摄信息”处理，不阻塞整本相册。进度通过 `album:stats-progress` 推送（150ms 节流），渲染进程按 `albumId` 过滤。
+- 同一相册的并发统计请求在 `library.ts` 中合并为同一个任务，多个监听者共享进度；相册被移除时同时删除 `statsJobs` 条目与缓存文件。
+- 缓存位置 `app.getPath('userData')/exif-cache/<albumId>.json`，按相册分文件，避免启动时加载整个库。entry 以照片 id（规范化路径的 sha1）为 key，记录 `mtimeMs` / `size` 用于失效；保存时裁掉已不在相册中的照片，采用临时文件 + rename 原子写入，退出时 `before-quit` 同步落盘。
+- 汇总规则：焦距优先取 35mm 等效，缺失时用实际焦距，按 ≤20 / 21–35 / 36–50 / 51–85 / 86–135 / 136–200 / 201–400 / >400 mm 分档；光圈按 0.1 档取值；快门按 1/3 档左右分档；ISO 取整；拍摄时间按相机本地墙上时间归到 `YYYY-MM` 与 `HH:00`。缺失值不参与统计，空档位不返回。
+- `withExif` 表示至少含有一个统计字段的照片数；`firstTakenAt` / `lastTakenAt` 给出拍摄时间范围。
+- UI 使用纯 CSS 横向条形图，不引入图表库；首次统计会提示“逐张读取、完成后缓存”，无 EXIF 时显示空状态而不报错。
+
 ## TODO
 
 - [x] MVP：相册库（添加/移除/持久化）+ 三张叠放封面 + `thumb://` 缩略图协议 + 照片网格
 - [x] 照片观赏窗口：磨砂玻璃遮罩、1920px 高清预览、键盘/按钮翻页、相邻预加载
 - [x] 照片翻转详情：3D 卡片翻转 + EXIF 按需读取（相机/镜头/焦距/光圈/快门/ISO/拍摄时间）+ 尺寸/格式/大小
 - [ ] 用真实尼康 NEF 样张验证 `extract-raw-preview` 的预览尺寸、方向与缓存行为
-- [ ] 扫描性能优化：目前每次列出相册都会 stat 全部文件，后续改为缓存扫描结果并在后台刷新
+- [x] 扫描性能优化：`scan-cache.json` 持久化 + 目录 mtime 失效 + 先显示缓存后台刷新；缩略图并发/优先级调优
+- [x] 网格虚拟滚动：固定方格行窗口化（只渲染可视区 ±3 行），5000 张相册实测 DOM 从 5000 降到约 24–36 个格子
+- [ ] 缩略图缓存容量上限（LRU）与后台预取首屏缩略图
 - [ ] 相册重命名（`name` 与 `path` 已分离，需补 IPC 与 UI）
 - [ ] 多种照片排序策略（拍摄时间、文件名、大小等），默认创建时间倒序
 - [ ] 递归扫描开关
 - [ ] 相似图片归类（进入相册后的视图，暂不实现）：先用 pHash/dHash + Hamming 距离 + 并查集聚类；效果不足再考虑 CLIP embedding
-- [ ] EXIF 统计（后期）：焦距、光圈、快门、ISO、拍摄时间；缺失值为 null 并在统计时跳过；数据量增大后引入 better-sqlite3 索引
+- [x] EXIF 统计 v1：焦距、光圈、快门、ISO、拍摄月份/时段、拍摄时间范围；按相册缓存 + 进度推送 + 纯 CSS 条形图
+- [ ] EXIF 统计增强（数据量增大后）：better-sqlite3 索引、跨相册汇总、按时间/器材筛选
 - [ ] NEF 详情验证：当前用 exifr 读标准 EXIF；如果后续需要尼康 maker notes（如镜头编号、快门次数），再评估 exiftool-vendored
 - [ ] 目录监听（chokidar）与缩略图缓存失效策略
 - [ ] 打包验证：sharp 原生模块的 externalize / asarUnpack 配置

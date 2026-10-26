@@ -1,197 +1,15 @@
 var __defProp = Object.defineProperty;
 var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
 var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
-import { app, protocol, BrowserWindow, ipcMain, dialog } from "electron";
+import { app, protocol, Menu, BrowserWindow, ipcMain, dialog } from "electron";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import fs from "node:fs/promises";
 import crypto from "node:crypto";
+import fsSync from "node:fs";
 import sharp from "sharp";
+import os from "node:os";
 import { extractThumbnail } from "extract-raw-preview";
-function normalizePath(filePath) {
-  const resolved = path.resolve(filePath);
-  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
-}
-async function mapLimit(items, limit, fn) {
-  const results = new Array(items.length);
-  let cursor = 0;
-  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
-    while (cursor < items.length) {
-      const index = cursor++;
-      results[index] = await fn(items[index], index);
-    }
-  });
-  await Promise.all(workers);
-  return results;
-}
-const IMAGE_EXTENSIONS = /* @__PURE__ */ new Set([
-  ".jpg",
-  ".jpeg",
-  ".png",
-  ".webp",
-  ".gif",
-  ".tif",
-  ".tiff",
-  ".nef"
-]);
-const THUMB_HOST$1 = "photo";
-const registry = /* @__PURE__ */ new Map();
-function photoId(filePath) {
-  return crypto.createHash("sha1").update(normalizePath(filePath)).digest("hex").slice(0, 20);
-}
-function makeThumbUrl(id, width, version) {
-  return `thumb://${THUMB_HOST$1}/${id}?w=${width}&v=${Math.round(version)}`;
-}
-function getPhotoFile(id) {
-  return registry.get(id);
-}
-async function scanAlbum(dir) {
-  let entries;
-  try {
-    entries = await fs.readdir(dir, { withFileTypes: true });
-  } catch {
-    return { photos: [], missing: true };
-  }
-  const candidates = entries.filter(
-    (entry) => entry.isFile() && IMAGE_EXTENSIONS.has(path.extname(entry.name).toLowerCase())
-  );
-  const photos = await mapLimit(candidates, 16, async (entry) => {
-    const filePath = path.join(dir, entry.name);
-    try {
-      const stat = await fs.stat(filePath);
-      if (!stat.isFile()) return null;
-      const createdAt = stat.birthtimeMs > 0 ? stat.birthtimeMs : stat.mtimeMs;
-      const file = {
-        path: filePath,
-        name: entry.name,
-        createdAt,
-        mtimeMs: stat.mtimeMs,
-        size: stat.size
-      };
-      registry.set(photoId(filePath), file);
-      return file;
-    } catch {
-      return null;
-    }
-  });
-  const sorted = photos.filter((photo) => photo !== null).sort((a2, b2) => b2.createdAt - a2.createdAt || a2.name.localeCompare(b2.name, "zh-Hans-CN", { numeric: true }));
-  return { photos: sorted, missing: false };
-}
-async function scanAlbumPhotos(dir) {
-  const { photos } = await scanAlbum(dir);
-  return photos.map((photo) => ({
-    id: photoId(photo.path),
-    name: photo.name,
-    createdAt: photo.createdAt,
-    thumbUrl: makeThumbUrl(photoId(photo.path), 320, photo.mtimeMs),
-    viewUrl: makeThumbUrl(photoId(photo.path), 1920, photo.mtimeMs)
-  }));
-}
-function coverThumbsOf(photos) {
-  return photos.slice(0, 3).map((photo) => makeThumbUrl(photoId(photo.path), 480, photo.mtimeMs));
-}
-const LIBRARY_VERSION = 1;
-const SCAN_CONCURRENCY = 4;
-let records = [];
-let loaded = false;
-let persistQueue = Promise.resolve();
-function libraryFile() {
-  return path.join(app.getPath("userData"), "library.json");
-}
-function albumId(filePath) {
-  return crypto.createHash("sha1").update(normalizePath(filePath)).digest("hex").slice(0, 16);
-}
-function toAlbum(record, scan) {
-  return {
-    id: record.id,
-    path: record.path,
-    name: record.name,
-    addedAt: record.addedAt,
-    photoCount: scan.photos.length,
-    coverThumbs: coverThumbsOf(scan.photos),
-    missing: scan.missing
-  };
-}
-function isAlbumRecord(value) {
-  if (!value || typeof value !== "object") return false;
-  const record = value;
-  return typeof record.id === "string" && typeof record.path === "string";
-}
-async function loadLibrary() {
-  if (loaded) return;
-  loaded = true;
-  try {
-    const raw = await fs.readFile(libraryFile(), "utf8");
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed.albums)) return;
-    records = parsed.albums.filter(isAlbumRecord).map((record) => ({
-      id: record.id,
-      path: record.path,
-      name: typeof record.name === "string" && record.name ? record.name : path.basename(record.path),
-      addedAt: Number(record.addedAt) || Date.now()
-    }));
-  } catch (error) {
-    const code = error.code;
-    if (code !== "ENOENT") {
-      console.error("[library] failed to load library.json:", error);
-    }
-  }
-}
-function persist() {
-  const snapshot = { version: LIBRARY_VERSION, albums: records };
-  const serialized = JSON.stringify(snapshot, null, 2);
-  persistQueue = persistQueue.then(async () => {
-    const file = libraryFile();
-    await fs.mkdir(path.dirname(file), { recursive: true });
-    const tempFile = `${file}.${process.pid}.tmp`;
-    await fs.writeFile(tempFile, serialized, "utf8");
-    await fs.rename(tempFile, file);
-  }).catch((error) => {
-    console.error("[library] failed to save library.json:", error);
-  });
-  return persistQueue;
-}
-async function getAlbums() {
-  return mapLimit(records, SCAN_CONCURRENCY, async (record) => {
-    const scan = await scanAlbum(record.path);
-    return toAlbum(record, scan);
-  });
-}
-async function addAlbums(paths) {
-  const existing = new Set(records.map((record) => normalizePath(record.path)));
-  let added = 0;
-  let skipped = 0;
-  for (const rawPath of paths) {
-    const resolved = path.resolve(rawPath);
-    const normalized = normalizePath(resolved);
-    if (existing.has(normalized)) {
-      skipped += 1;
-      continue;
-    }
-    existing.add(normalized);
-    records.push({
-      id: albumId(resolved),
-      path: resolved,
-      name: path.basename(resolved) || resolved,
-      addedAt: Date.now()
-    });
-    added += 1;
-  }
-  if (added > 0) {
-    await persist();
-  }
-  return { albums: await getAlbums(), added, skipped };
-}
-async function removeAlbum(id) {
-  records = records.filter((record) => record.id !== id);
-  await persist();
-  return getAlbums();
-}
-async function listPhotos(albumId2) {
-  const record = records.find((item) => item.id === albumId2);
-  if (!record) return [];
-  return scanAlbumPhotos(record.path);
-}
 var e = "undefined" != typeof self ? self : global;
 const t = "undefined" != typeof navigator, i = t && "undefined" == typeof HTMLImageElement, n = !("undefined" == typeof global || "undefined" == typeof process || !process.versions || !process.versions.node), s = e.Buffer, r = e.BigInt, a = !!s, o = (e2) => e2;
 function l(e2, t2 = o) {
@@ -1629,6 +1447,762 @@ class yt extends re {
   }
 }
 c(yt, "type", "iptc"), c(yt, "translateValues", false), c(yt, "reviveValues", false), T.set("iptc", yt), U(E, "iptc", [[0, "ApplicationRecordVersion"], [3, "ObjectTypeReference"], [4, "ObjectAttributeReference"], [5, "ObjectName"], [7, "EditStatus"], [8, "EditorialUpdate"], [10, "Urgency"], [12, "SubjectReference"], [15, "Category"], [20, "SupplementalCategories"], [22, "FixtureIdentifier"], [25, "Keywords"], [26, "ContentLocationCode"], [27, "ContentLocationName"], [30, "ReleaseDate"], [35, "ReleaseTime"], [37, "ExpirationDate"], [38, "ExpirationTime"], [40, "SpecialInstructions"], [42, "ActionAdvised"], [45, "ReferenceService"], [47, "ReferenceDate"], [50, "ReferenceNumber"], [55, "DateCreated"], [60, "TimeCreated"], [62, "DigitalCreationDate"], [63, "DigitalCreationTime"], [65, "OriginatingProgram"], [70, "ProgramVersion"], [75, "ObjectCycle"], [80, "Byline"], [85, "BylineTitle"], [90, "City"], [92, "Sublocation"], [95, "State"], [100, "CountryCode"], [101, "Country"], [103, "OriginalTransmissionReference"], [105, "Headline"], [110, "Credit"], [115, "Source"], [116, "CopyrightNotice"], [118, "Contact"], [120, "Caption"], [121, "LocalCaption"], [122, "Writer"], [125, "RasterizedCaption"], [130, "ImageType"], [131, "ImageOrientation"], [135, "LanguageIdentifier"], [150, "AudioType"], [151, "AudioSamplingRate"], [152, "AudioSamplingResolution"], [153, "AudioDuration"], [154, "AudioOutcue"], [184, "JobID"], [185, "MasterDocumentID"], [186, "ShortDocumentID"], [187, "UniqueDocumentID"], [188, "OwnerID"], [200, "ObjectPreviewFileFormat"], [201, "ObjectPreviewFileVersion"], [202, "ObjectPreviewData"], [221, "Prefs"], [225, "ClassifyState"], [228, "SimilarityIndex"], [230, "DocumentNotes"], [231, "DocumentHistory"], [232, "ExifCameraInfo"], [255, "CatalogSets"]]), U(B, "iptc", [[10, { 0: "0 (reserved)", 1: "1 (most urgent)", 2: "2", 3: "3", 4: "4", 5: "5 (normal urgency)", 6: "6", 7: "7", 8: "8 (least urgent)", 9: "9 (user-defined priority)" }], [75, { a: "Morning", b: "Both Morning and Evening", p: "Evening" }], [131, { L: "Landscape", P: "Portrait", S: "Square" }]]);
+function toNumber(value) {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (Array.isArray(value)) return toNumber(value[0]);
+  if (typeof value !== "string") return null;
+  const fraction = value.match(/^(\d+(?:\.\d+)?)\/(\d+(?:\.\d+)?)$/);
+  if (fraction) {
+    const denominator = Number(fraction[2]);
+    return denominator ? Number(fraction[1]) / denominator : null;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+function parseExifDate(value) {
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value.getTime();
+  }
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : null;
+  }
+  if (typeof value !== "string") return null;
+  const match = value.match(/^(\d{4})[:\-](\d{2})[:\-](\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/);
+  if (!match) return null;
+  const [, year, month, day, hour, minute, second] = match;
+  const date = new Date(
+    Number(year),
+    Number(month) - 1,
+    Number(day),
+    Number(hour),
+    Number(minute),
+    Number(second ?? 0)
+  );
+  return Number.isNaN(date.getTime()) ? null : date.getTime();
+}
+function normalizePath(filePath) {
+  const resolved = path.resolve(filePath);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+async function mapLimit(items, limit, fn) {
+  const results = new Array(items.length);
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (cursor < items.length) {
+      const index = cursor++;
+      results[index] = await fn(items[index], index);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+const CACHE_VERSION$2 = 1;
+const WRITE_DEBOUNCE_MS = 800;
+let entries = /* @__PURE__ */ new Map();
+let loaded$1 = false;
+let dirty = false;
+let writeTimer = null;
+let writeQueue = Promise.resolve();
+let writeSequence$1 = 0;
+function cacheFile$1() {
+  return path.join(app.getPath("userData"), "scan-cache.json");
+}
+function isFiniteNumber(value) {
+  return typeof value === "number" && Number.isFinite(value);
+}
+function isCachedPhoto(value) {
+  if (!value || typeof value !== "object") return false;
+  const photo = value;
+  return typeof photo.name === "string" && photo.name.length > 0 && isFiniteNumber(photo.createdAt) && isFiniteNumber(photo.mtimeMs) && isFiniteNumber(photo.size);
+}
+function isCachedScan(value) {
+  if (!value || typeof value !== "object") return false;
+  const entry = value;
+  return typeof entry.dir === "string" && entry.dir.length > 0 && (entry.dirMtimeMs === null || isFiniteNumber(entry.dirMtimeMs)) && typeof entry.missing === "boolean" && isFiniteNumber(entry.scannedAt) && Array.isArray(entry.photos) && entry.photos.every(isCachedPhoto);
+}
+async function loadScanCache() {
+  if (loaded$1) return;
+  loaded$1 = true;
+  try {
+    const raw = await fs.readFile(cacheFile$1(), "utf8");
+    const parsed = JSON.parse(raw);
+    if (parsed.version !== CACHE_VERSION$2 || !Array.isArray(parsed.entries)) return;
+    for (const entry of parsed.entries) {
+      if (!isCachedScan(entry)) continue;
+      entries.set(normalizePath(entry.dir), entry);
+    }
+  } catch (error) {
+    const code = error.code;
+    if (code !== "ENOENT") {
+      console.error("[scan-cache] failed to load scan-cache.json:", error);
+    }
+  }
+}
+function getCachedScan(dir) {
+  return entries.get(normalizePath(dir));
+}
+function setCachedScan(entry) {
+  entries.set(normalizePath(entry.dir), entry);
+  dirty = true;
+  scheduleWrite();
+}
+function removeCachedScan(dir) {
+  if (!entries.delete(normalizePath(dir))) return;
+  dirty = true;
+  scheduleWrite();
+}
+function isScanFresh(entry, ttlMs) {
+  return Date.now() - entry.scannedAt < ttlMs;
+}
+function serialize() {
+  const snapshot = {
+    version: CACHE_VERSION$2,
+    entries: Array.from(entries.values())
+  };
+  return JSON.stringify(snapshot);
+}
+function tempFileFor(file) {
+  writeSequence$1 += 1;
+  return `${file}.${process.pid}.${writeSequence$1}.tmp`;
+}
+function scheduleWrite() {
+  if (writeTimer) return;
+  writeTimer = setTimeout(() => {
+    writeTimer = null;
+    void flushScanCache();
+  }, WRITE_DEBOUNCE_MS);
+}
+function flushScanCache() {
+  if (!dirty) return writeQueue;
+  dirty = false;
+  const serialized = serialize();
+  writeQueue = writeQueue.then(async () => {
+    const file = cacheFile$1();
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    const tempFile = tempFileFor(file);
+    await fs.writeFile(tempFile, serialized, "utf8");
+    await fs.rename(tempFile, file);
+  }).catch((error) => {
+    console.error("[scan-cache] failed to save scan-cache.json:", error);
+  });
+  return writeQueue;
+}
+function flushScanCacheSync() {
+  if (!dirty) return;
+  dirty = false;
+  try {
+    const file = cacheFile$1();
+    fsSync.mkdirSync(path.dirname(file), { recursive: true });
+    const tempFile = tempFileFor(file);
+    fsSync.writeFileSync(tempFile, serialize(), "utf8");
+    fsSync.renameSync(tempFile, file);
+  } catch (error) {
+    console.error("[scan-cache] failed to save scan-cache.json on quit:", error);
+  }
+}
+const IMAGE_EXTENSIONS = /* @__PURE__ */ new Set([
+  ".jpg",
+  ".jpeg",
+  ".png",
+  ".webp",
+  ".gif",
+  ".tif",
+  ".tiff",
+  ".nef"
+]);
+const THUMB_HOST$1 = "photo";
+const REVALIDATE_TTL_MS = 5 * 60 * 1e3;
+const registry = /* @__PURE__ */ new Map();
+const revalidating = /* @__PURE__ */ new Map();
+function photoId(filePath) {
+  return crypto.createHash("sha1").update(normalizePath(filePath)).digest("hex").slice(0, 20);
+}
+function makeThumbUrl(id, width, version, kind = "grid") {
+  return `thumb://${THUMB_HOST$1}/${id}?w=${width}&v=${Math.round(version)}&p=${kind}`;
+}
+function getPhotoFile(id) {
+  return registry.get(id);
+}
+function registerPhoto(photo) {
+  registry.set(photoId(photo.path), photo);
+  return photo;
+}
+function toPhotoFile(dir, cached) {
+  return {
+    path: path.join(dir, cached.name),
+    name: cached.name,
+    createdAt: cached.createdAt,
+    mtimeMs: cached.mtimeMs,
+    size: cached.size
+  };
+}
+function toCachedPhoto(photo) {
+  return {
+    name: photo.name,
+    createdAt: photo.createdAt,
+    mtimeMs: photo.mtimeMs,
+    size: photo.size
+  };
+}
+function restoreScan(entry) {
+  const photos = entry.photos.map((cached) => registerPhoto(toPhotoFile(entry.dir, cached)));
+  return { photos, missing: entry.missing };
+}
+async function scanAlbumFiles(dir) {
+  let dirStat;
+  try {
+    dirStat = await fs.stat(dir);
+  } catch {
+    return { photos: [], missing: true, dirMtimeMs: null };
+  }
+  if (!dirStat.isDirectory()) {
+    return { photos: [], missing: true, dirMtimeMs: null };
+  }
+  let entries2;
+  try {
+    entries2 = await fs.readdir(dir, { withFileTypes: true });
+  } catch {
+    return { photos: [], missing: true, dirMtimeMs: dirStat.mtimeMs };
+  }
+  const candidates = entries2.filter(
+    (entry) => entry.isFile() && IMAGE_EXTENSIONS.has(path.extname(entry.name).toLowerCase())
+  );
+  const photos = await mapLimit(candidates, 16, async (entry) => {
+    const filePath = path.join(dir, entry.name);
+    try {
+      const stat = await fs.stat(filePath);
+      if (!stat.isFile()) return null;
+      const createdAt = stat.birthtimeMs > 0 ? stat.birthtimeMs : stat.mtimeMs;
+      return registerPhoto({
+        path: filePath,
+        name: entry.name,
+        createdAt,
+        mtimeMs: stat.mtimeMs,
+        size: stat.size
+      });
+    } catch {
+      return null;
+    }
+  });
+  const sorted = photos.filter((photo) => photo !== null).sort((a2, b2) => b2.createdAt - a2.createdAt || a2.name.localeCompare(b2.name, "zh-Hans-CN", { numeric: true }));
+  return { photos: sorted, missing: false, dirMtimeMs: dirStat.mtimeMs };
+}
+function cacheScan(dir, scan) {
+  setCachedScan({
+    dir,
+    dirMtimeMs: scan.dirMtimeMs,
+    missing: scan.missing,
+    scannedAt: Date.now(),
+    photos: scan.photos.map(toCachedPhoto)
+  });
+}
+async function readDirSignature(dir) {
+  try {
+    const stat = await fs.stat(dir);
+    return { exists: stat.isDirectory(), mtimeMs: stat.mtimeMs };
+  } catch {
+    return { exists: false, mtimeMs: null };
+  }
+}
+function matchesSignature(entry, signature) {
+  if (entry.missing) {
+    return !signature.exists || entry.dirMtimeMs === signature.mtimeMs;
+  }
+  return signature.exists && entry.dirMtimeMs === signature.mtimeMs;
+}
+function scanChanged(cached, scan) {
+  if (cached.missing !== scan.missing) return true;
+  if (cached.photos.length !== scan.photos.length) return true;
+  for (let index = 0; index < scan.photos.length; index += 1) {
+    const a2 = cached.photos[index];
+    const b2 = scan.photos[index];
+    if (a2.name !== b2.name || a2.createdAt !== b2.createdAt || a2.mtimeMs !== b2.mtimeMs || a2.size !== b2.size) {
+      return true;
+    }
+  }
+  return false;
+}
+async function getAlbumScan(dir) {
+  const cached = getCachedScan(dir);
+  if (cached) return restoreScan(cached);
+  const scan = await scanAlbumFiles(dir);
+  cacheScan(dir, scan);
+  return { photos: scan.photos, missing: scan.missing };
+}
+function summaryOfScan(scan) {
+  return {
+    photoCount: scan.photos.length,
+    missing: scan.missing,
+    coverThumbs: scan.photos.slice(0, 3).map((photo) => makeThumbUrl(photoId(photo.path), 480, photo.mtimeMs, "cover"))
+  };
+}
+function summaryOfCached(entry) {
+  return {
+    photoCount: entry.photos.length,
+    missing: entry.missing,
+    coverThumbs: entry.photos.slice(0, 3).map((cached) => {
+      const photo = registerPhoto(toPhotoFile(entry.dir, cached));
+      return makeThumbUrl(photoId(photo.path), 480, photo.mtimeMs, "cover");
+    })
+  };
+}
+async function getAlbumSummaryForLibrary(dir) {
+  const cached = getCachedScan(dir);
+  if (cached) {
+    const signature = await readDirSignature(dir);
+    if (matchesSignature(cached, signature)) return summaryOfCached(cached);
+  }
+  const scan = await scanAlbumFiles(dir);
+  cacheScan(dir, scan);
+  return summaryOfScan(scan);
+}
+function revalidateAlbum(dir) {
+  const key = normalizePath(dir);
+  const pending = revalidating.get(key);
+  if (pending) return pending;
+  const task = revalidate(dir).finally(() => {
+    revalidating.delete(key);
+  });
+  revalidating.set(key, task);
+  return task;
+}
+async function revalidate(dir) {
+  const cached = getCachedScan(dir);
+  const signature = await readDirSignature(dir);
+  if (cached && matchesSignature(cached, signature) && isScanFresh(cached, REVALIDATE_TTL_MS)) {
+    return null;
+  }
+  const scan = await scanAlbumFiles(dir);
+  const changed = !cached || scanChanged(cached, scan);
+  cacheScan(dir, scan);
+  return changed ? { photos: scan.photos, missing: scan.missing } : null;
+}
+function toPhoto(photo) {
+  const id = photoId(photo.path);
+  return {
+    id,
+    name: photo.name,
+    createdAt: photo.createdAt,
+    thumbUrl: makeThumbUrl(id, 320, photo.mtimeMs, "grid"),
+    viewUrl: makeThumbUrl(id, 1920, photo.mtimeMs, "view")
+  };
+}
+function photosOfScan(scan) {
+  return scan.photos.map(toPhoto);
+}
+const CACHE_VERSION$1 = 1;
+const READ_CONCURRENCY = 4;
+const PROGRESS_INTERVAL_MS = 150;
+const EXIF_FIELDS$1 = [
+  "FocalLength",
+  "FocalLengthIn35mmFormat",
+  "FNumber",
+  "ExposureTime",
+  "ISO",
+  "ISOSpeedRatings",
+  "DateTimeOriginal",
+  "CreateDate"
+];
+const caches = /* @__PURE__ */ new Map();
+let writeSequence = 0;
+function cacheDir() {
+  return path.join(app.getPath("userData"), "exif-cache");
+}
+function cacheFile(albumId2) {
+  return path.join(cacheDir(), `${albumId2}.json`);
+}
+function isFiniteOrNull(value) {
+  return value === null || typeof value === "number" && Number.isFinite(value);
+}
+function isCachedEntry(value) {
+  if (!value || typeof value !== "object") return false;
+  const entry = value;
+  return typeof entry.mtimeMs === "number" && Number.isFinite(entry.mtimeMs) && typeof entry.size === "number" && Number.isFinite(entry.size) && isFiniteOrNull(entry.takenAt) && isFiniteOrNull(entry.focalLength) && isFiniteOrNull(entry.focalLength35) && isFiniteOrNull(entry.aperture) && isFiniteOrNull(entry.shutterSeconds) && isFiniteOrNull(entry.iso);
+}
+async function loadCache(albumId2) {
+  const existing = caches.get(albumId2);
+  if (existing) return existing;
+  const cache2 = { entries: /* @__PURE__ */ new Map(), dirty: false };
+  caches.set(albumId2, cache2);
+  try {
+    const raw = await fs.readFile(cacheFile(albumId2), "utf8");
+    const parsed = JSON.parse(raw);
+    if (parsed.version === CACHE_VERSION$1 && parsed.entries && typeof parsed.entries === "object") {
+      for (const [id, entry] of Object.entries(parsed.entries)) {
+        if (isCachedEntry(entry)) cache2.entries.set(id, entry);
+      }
+    }
+  } catch (error) {
+    const code = error.code;
+    if (code !== "ENOENT") {
+      console.warn("[exif-stats] failed to load cache:", albumId2, error);
+    }
+  }
+  return cache2;
+}
+async function saveCache(albumId2, validIds) {
+  const cache2 = caches.get(albumId2);
+  if (!cache2) return;
+  for (const id of cache2.entries.keys()) {
+    if (!validIds.has(id)) {
+      cache2.entries.delete(id);
+      cache2.dirty = true;
+    }
+  }
+  if (!cache2.dirty) return;
+  cache2.dirty = false;
+  const entries2 = {};
+  for (const [id, entry] of cache2.entries) entries2[id] = entry;
+  const serialized = JSON.stringify({ version: CACHE_VERSION$1, entries: entries2 });
+  try {
+    const file = cacheFile(albumId2);
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    const tempFile = `${file}.${process.pid}.${writeSequence++}.tmp`;
+    await fs.writeFile(tempFile, serialized, "utf8");
+    await fs.rename(tempFile, file);
+  } catch (error) {
+    cache2.dirty = true;
+    console.warn("[exif-stats] failed to save cache:", albumId2, error);
+  }
+}
+function flushExifCacheSync() {
+  for (const [albumId2, cache2] of caches) {
+    if (!cache2.dirty) continue;
+    cache2.dirty = false;
+    try {
+      const entries2 = {};
+      for (const [id, entry] of cache2.entries) entries2[id] = entry;
+      const file = cacheFile(albumId2);
+      fsSync.mkdirSync(path.dirname(file), { recursive: true });
+      const tempFile = `${file}.${process.pid}.${writeSequence++}.tmp`;
+      fsSync.writeFileSync(
+        tempFile,
+        JSON.stringify({ version: CACHE_VERSION$1, entries: entries2 }),
+        "utf8"
+      );
+      fsSync.renameSync(tempFile, file);
+    } catch (error) {
+      cache2.dirty = true;
+      console.warn("[exif-stats] failed to save cache on quit:", albumId2, error);
+    }
+  }
+}
+function removeAlbumExifCache(albumId2) {
+  caches.delete(albumId2);
+  void fs.rm(cacheFile(albumId2), { force: true }).catch(() => void 0);
+}
+const EMPTY_FIELDS = {
+  takenAt: null,
+  focalLength: null,
+  focalLength35: null,
+  aperture: null,
+  shutterSeconds: null,
+  iso: null
+};
+function positiveNumber(value) {
+  const parsed = toNumber(value);
+  return parsed !== null && parsed > 0 ? parsed : null;
+}
+async function readStatsFields(file) {
+  let exif = null;
+  try {
+    const parsed = await tt.parse(file.path, {
+      pick: EXIF_FIELDS$1,
+      translateValues: false,
+      reviveValues: false
+    });
+    exif = parsed ?? null;
+  } catch {
+  }
+  if (!exif) return EMPTY_FIELDS;
+  return {
+    takenAt: parseExifDate(exif.DateTimeOriginal) ?? parseExifDate(exif.CreateDate),
+    focalLength: positiveNumber(exif.FocalLength),
+    focalLength35: positiveNumber(exif.FocalLengthIn35mmFormat),
+    aperture: positiveNumber(exif.FNumber),
+    shutterSeconds: positiveNumber(exif.ExposureTime),
+    iso: positiveNumber(exif.ISO) ?? positiveNumber(exif.ISOSpeedRatings)
+  };
+}
+async function computeAlbumStats(albumId2, photos, onProgress) {
+  const cache2 = await loadCache(albumId2);
+  const ids = photos.map((photo) => photoId(photo.path));
+  const total = photos.length;
+  const fields = new Array(total);
+  let processed = 0;
+  let lastReport = 0;
+  const report = (force = false) => {
+    const now = Date.now();
+    if (!force && now - lastReport < PROGRESS_INTERVAL_MS) return;
+    lastReport = now;
+    onProgress(processed, total);
+  };
+  report(true);
+  await mapLimit(photos, READ_CONCURRENCY, async (photo, index) => {
+    const id = ids[index];
+    const cached = cache2.entries.get(id);
+    if (cached && cached.mtimeMs === photo.mtimeMs && cached.size === photo.size) {
+      fields[index] = cached;
+    } else {
+      const entry = {
+        mtimeMs: photo.mtimeMs,
+        size: photo.size,
+        ...await readStatsFields(photo)
+      };
+      cache2.entries.set(id, entry);
+      cache2.dirty = true;
+      fields[index] = entry;
+    }
+    processed += 1;
+    report();
+  });
+  report(true);
+  await saveCache(albumId2, new Set(ids));
+  return aggregateStats(total, fields);
+}
+const FOCAL_BINS = [
+  { max: 20, label: "≤ 20 mm" },
+  { max: 35, label: "21–35 mm" },
+  { max: 50, label: "36–50 mm" },
+  { max: 85, label: "51–85 mm" },
+  { max: 135, label: "86–135 mm" },
+  { max: 200, label: "136–200 mm" },
+  { max: 400, label: "201–400 mm" },
+  { max: Number.POSITIVE_INFINITY, label: "> 400 mm" }
+];
+const SHUTTER_BINS = [
+  { min: 1, label: "≥ 1 s" },
+  { min: 1 / 2, label: "1/2–1 s" },
+  { min: 1 / 4, label: "1/4–1/2 s" },
+  { min: 1 / 8, label: "1/8–1/4 s" },
+  { min: 1 / 15, label: "1/15–1/8 s" },
+  { min: 1 / 30, label: "1/30–1/15 s" },
+  { min: 1 / 60, label: "1/60–1/30 s" },
+  { min: 1 / 125, label: "1/125–1/60 s" },
+  { min: 1 / 250, label: "1/250–1/125 s" },
+  { min: 1 / 500, label: "1/500–1/250 s" },
+  { min: 1 / 1e3, label: "1/1000–1/500 s" },
+  { min: Number.NEGATIVE_INFINITY, label: "< 1/1000 s" }
+];
+function bump(map, key) {
+  map.set(key, (map.get(key) ?? 0) + 1);
+}
+function hasShootingInfo(field) {
+  return field.takenAt !== null || field.focalLength !== null || field.focalLength35 !== null || field.aperture !== null || field.shutterSeconds !== null || field.iso !== null;
+}
+function binBuckets(keys, counts) {
+  const buckets = [];
+  for (const label of keys) {
+    const count = counts.get(label);
+    if (count) buckets.push({ label, count });
+  }
+  return buckets;
+}
+function sortedNumberBuckets(counts, format) {
+  return Array.from(counts.entries()).sort((a2, b2) => a2[0] - b2[0]).map(([value, count]) => ({ label: format(value), count }));
+}
+function sortedStringBuckets(counts) {
+  return Array.from(counts.entries()).sort((a2, b2) => a2[0].localeCompare(b2[0])).map(([label, count]) => ({ label, count }));
+}
+function aggregateStats(photoCount, fields) {
+  let withExif = 0;
+  let firstTakenAt = null;
+  let lastTakenAt = null;
+  const focalCounts = /* @__PURE__ */ new Map();
+  const apertureCounts = /* @__PURE__ */ new Map();
+  const shutterCounts = /* @__PURE__ */ new Map();
+  const isoCounts = /* @__PURE__ */ new Map();
+  const monthCounts = /* @__PURE__ */ new Map();
+  const hourCounts = /* @__PURE__ */ new Map();
+  for (const field of fields) {
+    if (!hasShootingInfo(field)) continue;
+    withExif += 1;
+    if (field.takenAt !== null) {
+      if (firstTakenAt === null || field.takenAt < firstTakenAt) firstTakenAt = field.takenAt;
+      if (lastTakenAt === null || field.takenAt > lastTakenAt) lastTakenAt = field.takenAt;
+      const date = new Date(field.takenAt);
+      bump(monthCounts, `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`);
+      bump(hourCounts, date.getHours());
+    }
+    const focal = field.focalLength35 ?? field.focalLength;
+    if (focal !== null) {
+      const rounded = Math.round(focal);
+      const bin = FOCAL_BINS.find((item) => rounded <= item.max) ?? FOCAL_BINS[FOCAL_BINS.length - 1];
+      bump(focalCounts, bin.label);
+    }
+    if (field.aperture !== null) {
+      bump(apertureCounts, Math.round(field.aperture * 10) / 10);
+    }
+    if (field.shutterSeconds !== null) {
+      const bin = SHUTTER_BINS.find((item) => field.shutterSeconds !== null && field.shutterSeconds >= item.min) ?? SHUTTER_BINS[SHUTTER_BINS.length - 1];
+      bump(shutterCounts, bin.label);
+    }
+    if (field.iso !== null) {
+      bump(isoCounts, Math.round(field.iso));
+    }
+  }
+  return {
+    photoCount,
+    withExif,
+    firstTakenAt,
+    lastTakenAt,
+    focalLengths: binBuckets(
+      FOCAL_BINS.map((item) => item.label),
+      focalCounts
+    ),
+    apertures: sortedNumberBuckets(apertureCounts, (value) => `f/${value}`),
+    shutterSpeeds: binBuckets(
+      SHUTTER_BINS.map((item) => item.label),
+      shutterCounts
+    ),
+    isos: sortedNumberBuckets(isoCounts, (value) => String(value)),
+    months: sortedStringBuckets(monthCounts),
+    hours: sortedNumberBuckets(hourCounts, (value) => `${String(value).padStart(2, "0")}:00`)
+  };
+}
+const LIBRARY_VERSION = 1;
+const SCAN_CONCURRENCY = 4;
+let records = [];
+let loaded = false;
+let persistQueue = Promise.resolve();
+let photosUpdatedHandler = null;
+const statsJobs = /* @__PURE__ */ new Map();
+function setPhotosUpdatedHandler(handler) {
+  photosUpdatedHandler = handler;
+}
+function libraryFile() {
+  return path.join(app.getPath("userData"), "library.json");
+}
+function albumId(filePath) {
+  return crypto.createHash("sha1").update(normalizePath(filePath)).digest("hex").slice(0, 16);
+}
+function toAlbum(record, summary) {
+  return {
+    id: record.id,
+    path: record.path,
+    name: record.name,
+    addedAt: record.addedAt,
+    photoCount: summary.photoCount,
+    coverThumbs: summary.coverThumbs,
+    missing: summary.missing
+  };
+}
+function isAlbumRecord(value) {
+  if (!value || typeof value !== "object") return false;
+  const record = value;
+  return typeof record.id === "string" && typeof record.path === "string";
+}
+async function loadLibrary() {
+  if (loaded) return;
+  loaded = true;
+  try {
+    const raw = await fs.readFile(libraryFile(), "utf8");
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed.albums)) return;
+    records = parsed.albums.filter(isAlbumRecord).map((record) => ({
+      id: record.id,
+      path: record.path,
+      name: typeof record.name === "string" && record.name ? record.name : path.basename(record.path),
+      addedAt: Number(record.addedAt) || Date.now()
+    }));
+  } catch (error) {
+    const code = error.code;
+    if (code !== "ENOENT") {
+      console.error("[library] failed to load library.json:", error);
+    }
+  }
+}
+function persist() {
+  const snapshot = { version: LIBRARY_VERSION, albums: records };
+  const serialized = JSON.stringify(snapshot, null, 2);
+  persistQueue = persistQueue.then(async () => {
+    const file = libraryFile();
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    const tempFile = `${file}.${process.pid}.tmp`;
+    await fs.writeFile(tempFile, serialized, "utf8");
+    await fs.rename(tempFile, file);
+  }).catch((error) => {
+    console.error("[library] failed to save library.json:", error);
+  });
+  return persistQueue;
+}
+async function getAlbums() {
+  return mapLimit(records, SCAN_CONCURRENCY, async (record) => {
+    const summary = await getAlbumSummaryForLibrary(record.path);
+    return toAlbum(record, summary);
+  });
+}
+async function addAlbums(paths) {
+  const existing = new Set(records.map((record) => normalizePath(record.path)));
+  let added = 0;
+  let skipped = 0;
+  for (const rawPath of paths) {
+    const resolved = path.resolve(rawPath);
+    const normalized = normalizePath(resolved);
+    if (existing.has(normalized)) {
+      skipped += 1;
+      continue;
+    }
+    existing.add(normalized);
+    records.push({
+      id: albumId(resolved),
+      path: resolved,
+      name: path.basename(resolved) || resolved,
+      addedAt: Date.now()
+    });
+    added += 1;
+  }
+  if (added > 0) {
+    await persist();
+  }
+  return { albums: await getAlbums(), added, skipped };
+}
+async function removeAlbum(id) {
+  const removed = records.find((record) => record.id === id);
+  records = records.filter((record) => record.id !== id);
+  if (removed) {
+    removeCachedScan(removed.path);
+    removeAlbumExifCache(id);
+    await persist();
+  }
+  return getAlbums();
+}
+async function listPhotos(albumId2) {
+  const record = records.find((item) => item.id === albumId2);
+  if (!record) return [];
+  const scan = await getAlbumScan(record.path);
+  void revalidateAlbum(record.path).then((updated) => {
+    if (updated && photosUpdatedHandler) {
+      photosUpdatedHandler(albumId2, photosOfScan(updated));
+    }
+  }).catch((error) => {
+    console.error("[library] failed to revalidate album:", record.path, error);
+  });
+  return photosOfScan(scan);
+}
+function getAlbumStats(albumId2, listener) {
+  const record = records.find((item) => item.id === albumId2);
+  if (!record) return Promise.resolve(null);
+  const existing = statsJobs.get(albumId2);
+  if (existing) {
+    existing.listeners.add(listener);
+    return existing.promise;
+  }
+  const listeners = /* @__PURE__ */ new Set([listener]);
+  const onProgress = (processed, total) => {
+    for (const notify of listeners) notify(processed, total);
+  };
+  const promise = getAlbumScan(record.path).then(
+    (scan) => computeAlbumStats(albumId2, scan.photos, onProgress)
+  );
+  const job = { promise, listeners };
+  statsJobs.set(albumId2, job);
+  const cleanup = () => {
+    if (statsJobs.get(albumId2) === job) statsJobs.delete(albumId2);
+  };
+  promise.then(cleanup, cleanup);
+  return promise;
+}
 const EXIF_FIELDS = [
   "Make",
   "Model",
@@ -1739,79 +2313,93 @@ function cleanString(value) {
   const trimmed = value.replace(/\0+$/, "").trim();
   return trimmed || null;
 }
-function toNumber(value) {
-  if (typeof value === "number") return Number.isFinite(value) ? value : null;
-  if (Array.isArray(value)) return toNumber(value[0]);
-  if (typeof value !== "string") return null;
-  const fraction = value.match(/^(\d+(?:\.\d+)?)\/(\d+(?:\.\d+)?)$/);
-  if (fraction) {
-    const denominator = Number(fraction[2]);
-    return denominator ? Number(fraction[1]) / denominator : null;
-  }
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-function parseExifDate(value) {
-  if (value instanceof Date) {
-    return Number.isNaN(value.getTime()) ? null : value.getTime();
-  }
-  if (typeof value === "number") {
-    return Number.isFinite(value) ? value : null;
-  }
-  if (typeof value !== "string") return null;
-  const match = value.match(/^(\d{4})[:\-](\d{2})[:\-](\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/);
-  if (!match) return null;
-  const [, year, month, day, hour, minute, second] = match;
-  const date = new Date(
-    Number(year),
-    Number(month) - 1,
-    Number(day),
-    Number(hour),
-    Number(minute),
-    Number(second ?? 0)
-  );
-  return Number.isNaN(date.getTime()) ? null : date.getTime();
-}
 const SCHEME = "thumb";
 const THUMB_HOST = "photo";
 const CACHE_VERSION = "v1";
 const WIDTH_BUCKETS = [160, 320, 480, 640, 960, 1280, 1920];
 const DEFAULT_WIDTH = 320;
-const MAX_CONCURRENCY = 4;
-class Semaphore {
-  constructor(max) {
-    __publicField(this, "active", 0);
-    __publicField(this, "queue", []);
-    this.max = max;
-  }
-  async run(task) {
-    await this.acquire();
-    try {
-      return await task();
-    } finally {
-      this.release();
-    }
-  }
-  acquire() {
-    if (this.active < this.max) {
-      this.active += 1;
-      return Promise.resolve();
-    }
-    return new Promise((resolve) => {
-      this.queue.push(() => {
-        this.active += 1;
-        resolve();
-      });
-    });
-  }
-  release() {
-    this.active -= 1;
-    const next = this.queue.shift();
-    if (next) next();
+const MAX_CONCURRENCY = Math.max(4, Math.min(8, os.availableParallelism()));
+sharp.concurrency(1);
+const PRIORITY_ORDER = ["view", "grid", "cover"];
+class ThumbnailDroppedError extends Error {
+  constructor() {
+    super("thumbnail request no longer visible");
+    this.name = "ThumbnailDroppedError";
   }
 }
-const limiter = new Semaphore(MAX_CONCURRENCY);
+class ThumbnailQueue {
+  constructor(max) {
+    __publicField(this, "active", 0);
+    __publicField(this, "queues", {
+      view: [],
+      grid: [],
+      cover: []
+    });
+    this.max = max;
+  }
+  run(priority, scope, task) {
+    return new Promise((resolve, reject) => {
+      const entry = {
+        scope,
+        reject,
+        start: () => {
+          this.active += 1;
+          task().then(resolve, reject).finally(() => {
+            this.active -= 1;
+            this.startNext();
+          });
+        }
+      };
+      if (this.active < this.max) {
+        entry.start();
+      } else {
+        this.queues[priority].push(entry);
+      }
+    });
+  }
+  /** 视图切换后，排队中的旧请求已不可见，直接取消，避免继续占用 CPU/磁盘 */
+  dropInactive(isActive) {
+    for (const priority of PRIORITY_ORDER) {
+      const queue = this.queues[priority];
+      if (queue.length === 0) continue;
+      let write = 0;
+      for (let read = 0; read < queue.length; read += 1) {
+        const entry = queue[read];
+        if (isActive(entry.scope, priority)) {
+          queue[write] = entry;
+          write += 1;
+        } else {
+          entry.reject(new ThumbnailDroppedError());
+        }
+      }
+      queue.length = write;
+    }
+  }
+  startNext() {
+    for (const priority of PRIORITY_ORDER) {
+      const entry = this.queues[priority].shift();
+      if (entry) {
+        entry.start();
+        return;
+      }
+    }
+  }
+}
+const limiter = new ThumbnailQueue(MAX_CONCURRENCY);
 const inFlight = /* @__PURE__ */ new Map();
+let activeScope;
+function setThumbnailScope(albumPath) {
+  activeScope = albumPath === null ? null : normalizePath(albumPath);
+  limiter.dropInactive(isScopeActive);
+}
+function isScopeActive(scope, priority) {
+  if (activeScope === void 0) return true;
+  if (activeScope === null) return priority === "cover";
+  return priority !== "cover" && scope === activeScope;
+}
+function scopeOf(file) {
+  return normalizePath(path.dirname(file.path));
+}
 function registerThumbScheme() {
   protocol.registerSchemesAsPrivileged([
     {
@@ -1830,7 +2418,8 @@ function installThumbProtocol() {
       const file = getPhotoFile(id);
       if (!file) return notFound();
       const width = pickWidth(url.searchParams.get("w"));
-      const thumbPath = await ensureThumbnail(file, width);
+      const priority = pickPriority(url.searchParams.get("p"), width);
+      const thumbPath = await ensureThumbnail(file, width, priority);
       const data = await fs.readFile(thumbPath);
       return new Response(new Uint8Array(data), {
         headers: {
@@ -1840,7 +2429,9 @@ function installThumbProtocol() {
         }
       });
     } catch (error) {
-      console.error("[thumbnail] failed:", request.url, error);
+      if (!(error instanceof ThumbnailDroppedError)) {
+        console.error("[thumbnail] failed:", request.url, error);
+      }
       return notFound();
     }
   });
@@ -1853,10 +2444,16 @@ function pickWidth(raw) {
   if (!Number.isFinite(requested) || requested <= 0) return DEFAULT_WIDTH;
   return WIDTH_BUCKETS.find((bucket) => bucket >= requested) ?? WIDTH_BUCKETS[WIDTH_BUCKETS.length - 1];
 }
+function pickPriority(raw, width) {
+  if (raw === "view" || raw === "grid" || raw === "cover") return raw;
+  if (width >= 960) return "view";
+  if (width >= 480) return "cover";
+  return "grid";
+}
 function cacheKey(file, width) {
   return crypto.createHash("sha1").update(`${file.path}|${file.mtimeMs}|${file.size}|${width}|${CACHE_VERSION}`).digest("hex");
 }
-async function ensureThumbnail(file, width) {
+async function ensureThumbnail(file, width, priority) {
   const key = cacheKey(file, width);
   const cachePath = path.join(app.getPath("userData"), "thumbnails", key.slice(0, 2), `${key}.webp`);
   const pending = inFlight.get(key);
@@ -1866,7 +2463,9 @@ async function ensureThumbnail(file, width) {
     return cachePath;
   } catch {
   }
-  const task = limiter.run(async () => {
+  const scope = scopeOf(file);
+  if (!isScopeActive(scope, priority)) throw new ThumbnailDroppedError();
+  const task = limiter.run(priority, scope, async () => {
     await fs.mkdir(path.dirname(cachePath), { recursive: true });
     const input = await loadImageInput(file.path);
     await sharp(input).rotate().resize({ width, withoutEnlargement: true }).webp({ quality: 82 }).toFile(cachePath);
@@ -1897,6 +2496,7 @@ const createWindow = () => {
     minHeight: 520,
     title: "本地相册",
     backgroundColor: "#141416",
+    autoHideMenuBar: true,
     webPreferences: {
       // package.json 中 "type": "module"，preload 会被编译为 preload.mjs
       preload: path.join(__dirname$1, "preload.mjs"),
@@ -1908,7 +2508,6 @@ const createWindow = () => {
   });
   if (process.env.VITE_DEV_SERVER_URL) {
     win.loadURL(process.env.VITE_DEV_SERVER_URL);
-    win.webContents.openDevTools();
   } else {
     win.loadFile(path.join(__dirname$1, "../dist/index.html"));
   }
@@ -1936,12 +2535,37 @@ function registerIpc() {
     if (!file) return null;
     return readPhotoDetails(file);
   });
+  ipcMain.handle("thumb:set-scope", (_event, albumPath) => {
+    if (albumPath !== null && typeof albumPath !== "string") {
+      throw new Error("无效的相册路径");
+    }
+    setThumbnailScope(albumPath);
+  });
+  ipcMain.handle("album:stats", (event, albumId2) => {
+    if (typeof albumId2 !== "string") throw new Error("无效的相册 id");
+    const sender = event.sender;
+    return getAlbumStats(albumId2, (processed, total) => {
+      if (!sender.isDestroyed()) {
+        sender.send("album:stats-progress", { albumId: albumId2, processed, total });
+      }
+    });
+  });
 }
 app.whenReady().then(async () => {
-  await loadLibrary();
+  Menu.setApplicationMenu(null);
+  await Promise.all([loadLibrary(), loadScanCache()]);
   installThumbProtocol();
   registerIpc();
   createWindow();
+  setPhotosUpdatedHandler((albumId2, photos) => {
+    if (win && !win.isDestroyed()) {
+      win.webContents.send("album:photos-updated", { albumId: albumId2, photos });
+    }
+  });
+});
+app.on("before-quit", () => {
+  flushScanCacheSync();
+  flushExifCacheSync();
 });
 app.on("activate", () => {
   if (BrowserWindow.getAllWindows().length === 0) {

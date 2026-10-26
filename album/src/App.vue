@@ -21,6 +21,7 @@
             <h2>{{ currentAlbum.name }}</h2>
             <span class="album-bar__path" :title="currentAlbum.path">{{ currentAlbum.path }}</span>
           </div>
+          <button class="btn btn--ghost" type="button" @click="showStats = true">统计</button>
           <span class="pill">{{ detailCount }} 张</span>
         </div>
 
@@ -53,7 +54,15 @@
         v-if="viewerIndex !== null && photos.length > 0"
         :photos="photos"
         :start-index="viewerIndex"
-        @close="viewerIndex = null"
+        @close="closeViewer"
+      />
+    </transition>
+
+    <transition name="viewer">
+      <AlbumStatsPanel
+        v-if="showStats && currentAlbum"
+        :album="currentAlbum"
+        @close="showStats = false"
       />
     </transition>
 
@@ -65,8 +74,9 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import type { Album, Photo } from '../shared/types'
+import type { Album, Photo, PhotosUpdatedEvent } from '../shared/types'
 import AlbumCard from './components/AlbumCard.vue'
+import AlbumStatsPanel from './components/AlbumStatsPanel.vue'
 import PhotoGrid from './components/PhotoGrid.vue'
 import PhotoViewer from './components/PhotoViewer.vue'
 
@@ -77,9 +87,12 @@ const currentAlbum = ref<Album | null>(null)
 const photos = ref<Photo[]>([])
 const photosLoading = ref(false)
 const viewerIndex = ref<number | null>(null)
+const showStats = ref(false)
 const message = ref('')
 
 let messageTimer: number | undefined
+/** 观赏窗口打开期间到达的后台更新，关闭后再应用 */
+let pendingPhotos: Photo[] | null = null
 
 const subtitle = computed(() => {
   if (currentAlbum.value) return currentAlbum.value.path
@@ -139,8 +152,12 @@ async function openAlbum(album: Album) {
   currentAlbum.value = album
   photos.value = []
   viewerIndex.value = null
+  showStats.value = false
+  pendingPhotos = null
   photosLoading.value = true
   try {
+    // 先切换缩略图作用域，取消相册库封面等旧任务，再请求当前相册的照片
+    await window.api.setThumbnailScope(album.path)
     photos.value = await window.api.listPhotos(album.id)
   } catch (error) {
     console.error(error)
@@ -158,6 +175,10 @@ function backToLibrary() {
   currentAlbum.value = null
   photos.value = []
   viewerIndex.value = null
+  showStats.value = false
+  pendingPhotos = null
+  // 回到首页只需要封面缩略图，取消相册网格中排队中的任务
+  void window.api.setThumbnailScope(null).catch(() => undefined)
   void loadAlbums()
 }
 
@@ -176,5 +197,36 @@ async function handleRemove(album: Album) {
   }
 }
 
-onMounted(loadAlbums)
+function applyPhotosUpdate(nextPhotos: Photo[]) {
+  if (!currentAlbum.value) return
+  photos.value = nextPhotos
+  currentAlbum.value = { ...currentAlbum.value, photoCount: nextPhotos.length }
+  const album = albums.value.find((item) => item.id === currentAlbum.value?.id)
+  if (album) album.photoCount = nextPhotos.length
+}
+
+function handlePhotosUpdated(event: PhotosUpdatedEvent) {
+  if (!currentAlbum.value || currentAlbum.value.id !== event.albumId) return
+  // 观赏窗口打开时不动底层列表，避免当前下标指向另一张照片
+  if (viewerIndex.value !== null) {
+    pendingPhotos = event.photos
+    return
+  }
+  applyPhotosUpdate(event.photos)
+}
+
+function closeViewer() {
+  viewerIndex.value = null
+  if (pendingPhotos) {
+    applyPhotosUpdate(pendingPhotos)
+    pendingPhotos = null
+  }
+}
+
+onMounted(() => {
+  window.api.onPhotosUpdated(handlePhotosUpdated)
+  // 首页只显示相册封面
+  void window.api.setThumbnailScope(null).catch(() => undefined)
+  void loadAlbums()
+})
 </script>

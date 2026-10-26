@@ -9,6 +9,9 @@
   --accent: #e8b04b;
   --accent-strong: #f3c268;
   --danger: #f06a6a;
+  /* 照片网格虚拟滚动的格子尺寸；PhotoGrid 读取这两个值做定位 */
+  --photo-min-cell: 150px;
+  --photo-gap: 10px;
 
   font-family: system-ui, -apple-system, 'Segoe UI', 'Microsoft YaHei', 'PingFang SC',
     'Noto Sans SC', sans-serif;
@@ -377,15 +380,15 @@ button {
 /* ---------- Photo grid ---------- */
 
 .photo-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-  gap: 10px;
+  /* 高度由虚拟滚动按行数内联设置，格子绝对定位 */
+  position: relative;
 }
 
 .photo {
-  position: relative;
+  position: absolute;
+  top: 0;
+  left: 0;
   margin: 0;
-  aspect-ratio: 1;
   border-radius: 10px;
   overflow: hidden;
   border: 1px solid rgba(255, 255, 255, 0.06);
@@ -905,6 +908,270 @@ button {
   opacity: 0;
 }
 
+/* ---------- EXIF stats ---------- */
+
+.stats {
+  position: fixed;
+  inset: 0;
+  z-index: 55;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 48px 24px;
+  overflow-y: auto;
+  background:
+    radial-gradient(60% 60% at 50% 30%, rgba(255, 255, 255, 0.05), transparent 70%),
+    rgba(10, 10, 13, 0.62);
+  backdrop-filter: blur(24px) saturate(140%);
+  -webkit-backdrop-filter: blur(24px) saturate(140%);
+  outline: none;
+}
+
+.stats__panel {
+  width: min(980px, 100%);
+  margin: auto;
+  padding: 26px 30px 30px;
+  border-radius: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background:
+    radial-gradient(120% 90% at 100% 0%, rgba(232, 176, 75, 0.07), transparent 55%),
+    linear-gradient(165deg, rgba(30, 30, 36, 0.98), rgba(17, 17, 21, 0.99));
+  box-shadow: 0 30px 70px rgba(0, 0, 0, 0.55);
+}
+
+.stats__header {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--border);
+}
+
+.stats__heading {
+  flex: 1;
+  min-width: 0;
+}
+
+.stats__eyebrow {
+  margin: 0 0 5px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  color: var(--accent);
+}
+
+.stats__title {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 20px;
+  font-weight: 650;
+}
+
+.stats__subtitle {
+  margin: 4px 0 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.stats__close {
+  flex: none;
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.06);
+  color: #eee;
+  font-size: 21px;
+  line-height: 1;
+  transition: background 0.18s ease, transform 0.18s ease;
+}
+
+.stats__close:hover {
+  background: rgba(255, 255, 255, 0.14);
+  transform: rotate(90deg);
+}
+
+.stats__loading {
+  padding: 42px 0 18px;
+}
+
+.stats__progress {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.stats__progress span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent), var(--accent-strong));
+  transition: width 0.2s ease;
+}
+
+.stats__loading-text {
+  margin: 14px 0 0;
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+.stats__hint {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.stats__empty {
+  margin: 28px 0 6px;
+  padding: 22px;
+  border-radius: 12px;
+  border: 1px dashed var(--border);
+  text-align: center;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.stats__summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 20px;
+}
+
+.stats__summary-item {
+  min-width: 0;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.stats__summary-label {
+  display: block;
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.stats__summary-value {
+  display: block;
+  margin-top: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 19px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.stats__summary-value small {
+  margin-left: 6px;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.stats__summary-value--date {
+  padding-top: 5px;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.stats__sections {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 24px 28px;
+  margin-top: 24px;
+}
+
+.stats-section {
+  min-width: 0;
+}
+
+.stats-section__head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.stats-section__title {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+}
+
+.stats-section__hint {
+  font-size: 10.5px;
+  color: var(--muted);
+}
+
+.stats-section__empty {
+  margin: 0;
+  padding: 10px 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.stats-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.stats-bar {
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr) 64px;
+  align-items: center;
+  gap: 9px;
+}
+
+.stats-bar__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.stats-bar__track {
+  height: 7px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.stats-bar__fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, rgba(232, 176, 75, 0.72), var(--accent-strong));
+  transition: width 0.35s ease;
+}
+
+.stats-bar__count {
+  text-align: right;
+  font-size: 11.5px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.stats-bar__count small {
+  margin-left: 5px;
+  font-size: 10px;
+  color: var(--muted);
+}
+
 /* ---------- States / toast ---------- */
 
 .state {
@@ -963,6 +1230,11 @@ button {
 /* ---------- Responsive ---------- */
 
 @media (max-width: 680px) {
+  :root {
+    --photo-min-cell: 110px;
+    --photo-gap: 8px;
+  }
+
   .app {
     padding: 22px 18px 56px;
   }
@@ -982,11 +1254,6 @@ button {
   .album-grid {
     grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
     gap: 14px;
-  }
-
-  .photo-grid {
-    grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
-    gap: 8px;
   }
 
   .album-bar {

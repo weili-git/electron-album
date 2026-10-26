@@ -2,8 +2,16 @@ import { app } from 'electron'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import crypto from 'node:crypto'
-import type { AddAlbumsResult, Album, Photo } from '../shared/types'
-import { coverThumbsOf, scanAlbum, scanAlbumPhotos, type AlbumScan } from './photos'
+import type { AddAlbumsResult, Album, AlbumStats, Photo } from '../shared/types'
+import { computeAlbumStats, removeAlbumExifCache } from './exifStats'
+import {
+  getAlbumScan,
+  getAlbumSummaryForLibrary,
+  photosOfScan,
+  revalidateAlbum,
+  type AlbumSummary
+} from './photos'
+import { removeCachedScan } from './scanCache'
 import { mapLimit, normalizePath } from './util'
 
 /** 持久化结构：路径与名称分开存储，名称默认取文件夹名，后续可重命名 */
@@ -26,6 +34,24 @@ let records: AlbumRecord[] = []
 let loaded = false
 let persistQueue: Promise<void> = Promise.resolve()
 
+type PhotosUpdatedHandler = (albumId: string, photos: Photo[]) => void
+let photosUpdatedHandler: PhotosUpdatedHandler | null = null
+
+export type StatsProgressListener = (processed: number, total: number) => void
+
+interface StatsJob {
+  promise: Promise<AlbumStats>
+  listeners: Set<StatsProgressListener>
+}
+
+/** 同一相册的统计只跑一次；面板关闭后重开可以复用正在进行的任务 */
+const statsJobs = new Map<string, StatsJob>()
+
+/** 后台重扫发现照片变化时，由主进程转发给渲染进程 */
+export function setPhotosUpdatedHandler(handler: PhotosUpdatedHandler | null): void {
+  photosUpdatedHandler = handler
+}
+
 function libraryFile(): string {
   return path.join(app.getPath('userData'), 'library.json')
 }
@@ -34,15 +60,15 @@ function albumId(filePath: string): string {
   return crypto.createHash('sha1').update(normalizePath(filePath)).digest('hex').slice(0, 16)
 }
 
-function toAlbum(record: AlbumRecord, scan: AlbumScan): Album {
+function toAlbum(record: AlbumRecord, summary: AlbumSummary): Album {
   return {
     id: record.id,
     path: record.path,
     name: record.name,
     addedAt: record.addedAt,
-    photoCount: scan.photos.length,
-    coverThumbs: coverThumbsOf(scan.photos),
-    missing: scan.missing
+    photoCount: summary.photoCount,
+    coverThumbs: summary.coverThumbs,
+    missing: summary.missing
   }
 }
 
@@ -95,11 +121,11 @@ function persist(): Promise<void> {
   return persistQueue
 }
 
-/** 读取相册库，并刷新每个相册的照片数与封面 */
+/** 读取相册库，并刷新每个相册的照片数与封面（优先使用扫描缓存） */
 export async function getAlbums(): Promise<Album[]> {
   return mapLimit(records, SCAN_CONCURRENCY, async (record) => {
-    const scan = await scanAlbum(record.path)
-    return toAlbum(record, scan)
+    const summary = await getAlbumSummaryForLibrary(record.path)
+    return toAlbum(record, summary)
   })
 }
 
@@ -133,13 +159,66 @@ export async function addAlbums(paths: string[]): Promise<AddAlbumsResult> {
 }
 
 export async function removeAlbum(id: string): Promise<Album[]> {
+  const removed = records.find((record) => record.id === id)
   records = records.filter((record) => record.id !== id)
-  await persist()
+  if (removed) {
+    removeCachedScan(removed.path)
+    removeAlbumExifCache(id)
+    await persist()
+  }
   return getAlbums()
 }
 
 export async function listPhotos(albumId: string): Promise<Photo[]> {
   const record = records.find((item) => item.id === albumId)
   if (!record) return []
-  return scanAlbumPhotos(record.path)
+
+  // 先返回缓存，界面立刻可见；随后在后台校验并推送变化
+  const scan = await getAlbumScan(record.path)
+  void revalidateAlbum(record.path)
+    .then((updated) => {
+      if (updated && photosUpdatedHandler) {
+        photosUpdatedHandler(albumId, photosOfScan(updated))
+      }
+    })
+    .catch((error) => {
+      console.error('[library] failed to revalidate album:', record.path, error)
+    })
+
+  return photosOfScan(scan)
+}
+
+/**
+ * 按需计算相册的 EXIF 统计：首次逐张解析，之后走 per-album 缓存。
+ * 进度回调按相册广播；同一相册的并发请求共用一次计算。
+ */
+export function getAlbumStats(
+  albumId: string,
+  listener: StatsProgressListener
+): Promise<AlbumStats | null> {
+  const record = records.find((item) => item.id === albumId)
+  if (!record) return Promise.resolve(null)
+
+  const existing = statsJobs.get(albumId)
+  if (existing) {
+    existing.listeners.add(listener)
+    return existing.promise
+  }
+
+  const listeners = new Set([listener])
+  const onProgress = (processed: number, total: number): void => {
+    for (const notify of listeners) notify(processed, total)
+  }
+
+  const promise = getAlbumScan(record.path).then((scan) =>
+    computeAlbumStats(albumId, scan.photos, onProgress)
+  )
+  const job: StatsJob = { promise, listeners }
+  statsJobs.set(albumId, job)
+  const cleanup = (): void => {
+    if (statsJobs.get(albumId) === job) statsJobs.delete(albumId)
+  }
+  promise.then(cleanup, cleanup)
+
+  return promise
 }

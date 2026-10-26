@@ -25,6 +25,12 @@ export interface Photo {
   viewUrl: string
 }
 
+/** 后台重新扫描发现照片变化时，主进程推送给渲染进程 */
+export interface PhotosUpdatedEvent {
+  albumId: string
+  photos: Photo[]
+}
+
 export interface AddAlbumsResult {
   albums: Album[]
   /** 本次实际新增的目录数量 */
@@ -59,6 +65,38 @@ export interface PhotoDetails {
   exposureBias: number | null
 }
 
+/** EXIF 统计中的一个分布项 */
+export interface StatsBucket {
+  label: string
+  count: number
+}
+
+/** 单个相册的 EXIF 统计结果；缺失字段对应的分布为空数组 */
+export interface AlbumStats {
+  photoCount: number
+  /** 至少有一项拍摄信息（时间/焦距/光圈/快门/ISO）的照片数 */
+  withExif: number
+  /** 拍摄时间范围，取自 EXIF 的相机本地时间 */
+  firstTakenAt: number | null
+  lastTakenAt: number | null
+  /** 焦距分布，优先使用 35mm 等效焦距 */
+  focalLengths: StatsBucket[]
+  apertures: StatsBucket[]
+  shutterSpeeds: StatsBucket[]
+  isos: StatsBucket[]
+  /** 按 EXIF 拍摄月份（YYYY-MM）分布 */
+  months: StatsBucket[]
+  /** 按 EXIF 拍摄小时（0–23）分布 */
+  hours: StatsBucket[]
+}
+
+/** EXIF 统计进度；主进程逐张读取时推送 */
+export interface AlbumStatsProgress {
+  albumId: string
+  processed: number
+  total: number
+}
+
 /** preload 暴露给渲染进程的 API */
 export interface AlbumApi {
   /** 打开选择目录对话框；取消时返回 null */
@@ -66,6 +104,14 @@ export interface AlbumApi {
   listAlbums(): Promise<Album[]>
   removeAlbum(id: string): Promise<Album[]>
   listPhotos(albumId: string): Promise<Photo[]>
+  /** 告知主进程当前可见的相册目录（null 表示相册库首页），用于取消旧视图的缩略图任务 */
+  setThumbnailScope(albumPath: string | null): Promise<void>
+  /** 读取相册的 EXIF 统计；首次读取逐张解析，之后使用缓存 */
+  getAlbumStats(albumId: string): Promise<AlbumStats | null>
+  /** 订阅 EXIF 统计进度；同一时间只保留一个订阅 */
+  onAlbumStatsProgress(callback: (event: AlbumStatsProgress) => void): void
   /** 按需读取照片详情；照片已不在登记表中时返回 null */
   getPhotoDetails(photoId: string): Promise<PhotoDetails | null>
+  /** 订阅后台扫描结果；同一时间只保留一个订阅 */
+  onPhotosUpdated(callback: (event: PhotosUpdatedEvent) => void): void
 }
