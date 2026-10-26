@@ -13,47 +13,86 @@
     :style="{ height: `${contentHeight}px` }"
   >
     <figure
-      v-for="item in visiblePhotos"
-      :key="item.photo.id"
+      v-for="item in visibleItems"
+      :key="item.key"
       class="photo"
+      :class="{ 'photo--group': item.grouped }"
       :style="item.style"
       tabindex="0"
       role="button"
-      :aria-label="`查看 ${item.photo.name}`"
-      @click="$emit('open', item.index)"
-      @keydown.enter.prevent="$emit('open', item.index)"
-      @keydown.space.prevent="$emit('open', item.index)"
+      :aria-label="ariaLabel(item)"
+      :title="item.grouped ? `${item.count} 张相似照片` : item.label"
+      @click="openItem(item)"
+      @keydown.enter.prevent="openItem(item)"
+      @keydown.space.prevent="openItem(item)"
     >
+      <template v-if="item.grouped">
+        <div class="photo__stack" aria-hidden="true">
+          <img
+            v-for="(cover, index) in item.covers"
+            :key="cover.id"
+            class="photo__stack-img"
+            :class="`photo__stack-img--${index}`"
+            :src="cover.thumbUrl"
+            alt=""
+            loading="lazy"
+            decoding="async"
+            draggable="false"
+            @error="handleStackError"
+          />
+        </div>
+        <span class="photo__group-count">{{ item.count }} 张</span>
+      </template>
       <img
-        :src="item.photo.thumbUrl"
-        :alt="item.photo.name"
+        v-else
+        :src="item.covers[0].thumbUrl"
+        :alt="item.label"
         loading="lazy"
         decoding="async"
         draggable="false"
         @error="handleError"
       />
-      <figcaption class="photo__name">{{ item.photo.name }}</figcaption>
+      <figcaption class="photo__name">{{ item.label }}</figcaption>
     </figure>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import type { Photo } from '../../shared/types'
+import type { Photo, SimilarGroup } from '../../shared/types'
 
 const props = defineProps<{
   photos: Photo[]
   loading: boolean
+  /** 相似照片分组；仅在 grouping 为 true 时参与网格布局 */
+  groups?: SimilarGroup[]
+  grouping?: boolean
 }>()
 
-defineEmits<{ open: [index: number] }>()
+const emit = defineEmits<{
+  open: [photos: Photo[], index: number, tag?: string]
+  /** 当前渲染窗口覆盖的照片下标范围，用于主进程优先分析屏幕附近 */
+  viewport: [start: number, end: number]
+}>()
 
 /** 可视区上下各多渲染几行，减少快速滚动时的空白 */
 const OVERSCAN_ROWS = 3
 
-interface VisiblePhoto {
-  photo: Photo
-  index: number
+/** 网格中的一项：普通照片显示单图，相似组显示扑克牌叠放 */
+interface GridItem {
+  key: string
+  /** 打开观赏窗口时使用的照片列表：普通照片为整本相册，相似组为组内成员 */
+  photos: Photo[]
+  /** 叠放封面，最多 3 张 */
+  covers: Photo[]
+  count: number
+  grouped: boolean
+  label: string
+  /** 普通照片在相册中的下标 */
+  albumIndex: number
+}
+
+interface VisibleItem extends GridItem {
   style: Record<string, string>
 }
 
@@ -80,18 +119,96 @@ const cellSize = computed(() => {
 
 const rowStride = computed(() => cellSize.value + gap.value)
 
-const totalRows = computed(() => Math.ceil(props.photos.length / columns.value))
+/**
+ * 把照片列表映射成网格项：
+ * 相似组在组内最靠前（创建时间最新）的照片位置占一个格子，其余成员不再单独显示。
+ */
+const items = computed<GridItem[]>(() => {
+  const photos = props.photos
+  const groups = props.groups ?? []
+  if (!props.grouping || groups.length === 0) {
+    return photos.map((photo, index) => ({
+      key: `p:${photo.id}`,
+      photos,
+      covers: [photo],
+      count: 1,
+      grouped: false,
+      label: photo.name,
+      albumIndex: index
+    }))
+  }
+
+  const groupById = new Map<string, SimilarGroup>()
+  for (const group of groups) {
+    for (const id of group.photoIds) groupById.set(id, group)
+  }
+  const photoById = new Map(photos.map((photo) => [photo.id, photo]))
+  const orderById = new Map(photos.map((photo, index) => [photo.id, index]))
+  const emitted = new Set<SimilarGroup>()
+  const result: GridItem[] = []
+
+  for (let index = 0; index < photos.length; index += 1) {
+    const photo = photos[index]
+    const group = groupById.get(photo.id)
+    if (!group) {
+      result.push({
+        key: `p:${photo.id}`,
+        photos,
+        covers: [photo],
+        count: 1,
+        grouped: false,
+        label: photo.name,
+        albumIndex: index
+      })
+      continue
+    }
+    if (emitted.has(group)) continue
+    emitted.add(group)
+
+    const members = group.photoIds
+      .map((id) => photoById.get(id))
+      .filter((member): member is Photo => Boolean(member))
+      .sort((a, b) => (orderById.get(a.id) ?? 0) - (orderById.get(b.id) ?? 0))
+
+    if (members.length < 2) {
+      result.push({
+        key: `p:${photo.id}`,
+        photos,
+        covers: [photo],
+        count: 1,
+        grouped: false,
+        label: photo.name,
+        albumIndex: index
+      })
+      continue
+    }
+
+    result.push({
+      key: `g:${members[0].id}`,
+      photos: members,
+      covers: members.slice(0, 3),
+      count: members.length,
+      grouped: true,
+      label: members[0].name,
+      albumIndex: index
+    })
+  }
+
+  return result
+})
+
+const totalRows = computed(() => Math.ceil(items.value.length / columns.value))
 
 const contentHeight = computed(() => {
   if (gridWidth.value <= 0 || totalRows.value === 0) return 0
   return totalRows.value * rowStride.value - gap.value
 })
 
-const visiblePhotos = computed<VisiblePhoto[]>(() => {
+const visibleItems = computed<VisibleItem[]>(() => {
   const cols = columns.value
   const cell = cellSize.value
   const stride = rowStride.value
-  if (cell <= 0 || stride <= 0 || props.photos.length === 0) return []
+  if (cell <= 0 || stride <= 0 || items.value.length === 0) return []
 
   const top = Math.max(0, viewportTop.value)
   const startRow = Math.max(0, Math.floor(top / stride) - OVERSCAN_ROWS)
@@ -99,16 +216,15 @@ const visiblePhotos = computed<VisiblePhoto[]>(() => {
     totalRows.value,
     Math.ceil((top + viewportHeight.value) / stride) + OVERSCAN_ROWS
   )
-  const start = Math.min(props.photos.length, startRow * cols)
-  const end = Math.min(props.photos.length, endRow * cols)
+  const start = Math.min(items.value.length, startRow * cols)
+  const end = Math.min(items.value.length, endRow * cols)
 
-  const items: VisiblePhoto[] = []
+  const visible: VisibleItem[] = []
   for (let index = start; index < end; index += 1) {
     const row = Math.floor(index / cols)
     const col = index % cols
-    items.push({
-      photo: props.photos[index],
-      index,
+    visible.push({
+      ...items.value[index],
       style: {
         width: `${cell}px`,
         height: `${cell}px`,
@@ -116,8 +232,29 @@ const visiblePhotos = computed<VisiblePhoto[]>(() => {
       }
     })
   }
-  return items
+  return visible
 })
+
+let lastViewport: { start: number; end: number } | null = null
+
+/** 只上报照片下标范围；相似组可能折叠多张照片，起点取其第一张 */
+watch(
+  visibleItems,
+  (items) => {
+    if (items.length === 0) return
+    let start = Number.POSITIVE_INFINITY
+    let end = -1
+    for (const item of items) {
+      if (item.albumIndex < start) start = item.albumIndex
+      if (item.albumIndex > end) end = item.albumIndex
+    }
+    if (!Number.isFinite(start) || end < 0) return
+    if (lastViewport && lastViewport.start === start && lastViewport.end === end) return
+    lastViewport = { start, end }
+    emit('viewport', start, end)
+  },
+  { immediate: true }
+)
 
 /** 列宽与间距由 CSS 媒体查询定义，这里读取以保证断点只有一处 */
 function readMetrics(): void {
@@ -162,9 +299,9 @@ watch(gridEl, (el, previous) => {
   measure()
 })
 
-// 加载完成、照片增删（含后台 SWR 推送）后都需要重新测量
+// 加载完成、照片增删、切换相似合并后都需要重新测量
 watch(
-  () => [props.loading, props.photos.length],
+  () => [props.loading, items.value.length],
   () => {
     void nextTick(scheduleMeasure)
   }
@@ -189,8 +326,28 @@ onBeforeUnmount(() => {
   window.removeEventListener('resize', handleResize)
 })
 
+function openItem(item: GridItem): void {
+  if (item.grouped) {
+    emit('open', item.photos, 0, `相似 ${item.count} 张`)
+  } else {
+    emit('open', item.photos, item.albumIndex)
+  }
+}
+
+function ariaLabel(item: GridItem): string {
+  return item.grouped
+    ? `查看 ${item.count} 张相似照片`
+    : `查看 ${item.label}`
+}
+
 function handleError(event: Event) {
   const image = event.currentTarget as HTMLImageElement
   image.closest('figure')?.classList.add('is-error')
+}
+
+/** 叠放封面单张失败时只隐藏那一张，不影响整组 */
+function handleStackError(event: Event) {
+  const image = event.currentTarget as HTMLImageElement
+  image.style.display = 'none'
 }
 </script>

@@ -1496,15 +1496,15 @@ async function mapLimit(items, limit, fn) {
   await Promise.all(workers);
   return results;
 }
-const CACHE_VERSION$2 = 1;
+const CACHE_VERSION$3 = 1;
 const WRITE_DEBOUNCE_MS = 800;
 let entries = /* @__PURE__ */ new Map();
 let loaded$1 = false;
 let dirty = false;
 let writeTimer = null;
 let writeQueue = Promise.resolve();
-let writeSequence$1 = 0;
-function cacheFile$1() {
+let writeSequence$2 = 0;
+function cacheFile$2() {
   return path.join(app.getPath("userData"), "scan-cache.json");
 }
 function isFiniteNumber(value) {
@@ -1524,9 +1524,9 @@ async function loadScanCache() {
   if (loaded$1) return;
   loaded$1 = true;
   try {
-    const raw = await fs.readFile(cacheFile$1(), "utf8");
+    const raw = await fs.readFile(cacheFile$2(), "utf8");
     const parsed = JSON.parse(raw);
-    if (parsed.version !== CACHE_VERSION$2 || !Array.isArray(parsed.entries)) return;
+    if (parsed.version !== CACHE_VERSION$3 || !Array.isArray(parsed.entries)) return;
     for (const entry of parsed.entries) {
       if (!isCachedScan(entry)) continue;
       entries.set(normalizePath(entry.dir), entry);
@@ -1556,14 +1556,14 @@ function isScanFresh(entry, ttlMs) {
 }
 function serialize() {
   const snapshot = {
-    version: CACHE_VERSION$2,
+    version: CACHE_VERSION$3,
     entries: Array.from(entries.values())
   };
   return JSON.stringify(snapshot);
 }
 function tempFileFor(file) {
-  writeSequence$1 += 1;
-  return `${file}.${process.pid}.${writeSequence$1}.tmp`;
+  writeSequence$2 += 1;
+  return `${file}.${process.pid}.${writeSequence$2}.tmp`;
 }
 function scheduleWrite() {
   if (writeTimer) return;
@@ -1577,7 +1577,7 @@ function flushScanCache() {
   dirty = false;
   const serialized = serialize();
   writeQueue = writeQueue.then(async () => {
-    const file = cacheFile$1();
+    const file = cacheFile$2();
     await fs.mkdir(path.dirname(file), { recursive: true });
     const tempFile = tempFileFor(file);
     await fs.writeFile(tempFile, serialized, "utf8");
@@ -1591,7 +1591,7 @@ function flushScanCacheSync() {
   if (!dirty) return;
   dirty = false;
   try {
-    const file = cacheFile$1();
+    const file = cacheFile$2();
     fsSync.mkdirSync(path.dirname(file), { recursive: true });
     const tempFile = tempFileFor(file);
     fsSync.writeFileSync(tempFile, serialize(), "utf8");
@@ -1794,8 +1794,8 @@ function toPhoto(photo) {
 function photosOfScan(scan) {
   return scan.photos.map(toPhoto);
 }
-const CACHE_VERSION$1 = 1;
-const READ_CONCURRENCY = 4;
+const CACHE_VERSION$2 = 1;
+const READ_CONCURRENCY$1 = 4;
 const PROGRESS_INTERVAL_MS = 150;
 const EXIF_FIELDS$1 = [
   "FocalLength",
@@ -1807,33 +1807,33 @@ const EXIF_FIELDS$1 = [
   "DateTimeOriginal",
   "CreateDate"
 ];
-const caches = /* @__PURE__ */ new Map();
-let writeSequence = 0;
-function cacheDir() {
+const caches$1 = /* @__PURE__ */ new Map();
+let writeSequence$1 = 0;
+function cacheDir$1() {
   return path.join(app.getPath("userData"), "exif-cache");
 }
-function cacheFile(albumId2) {
-  return path.join(cacheDir(), `${albumId2}.json`);
+function cacheFile$1(albumId2) {
+  return path.join(cacheDir$1(), `${albumId2}.json`);
 }
 function isFiniteOrNull(value) {
   return value === null || typeof value === "number" && Number.isFinite(value);
 }
-function isCachedEntry(value) {
+function isCachedEntry$1(value) {
   if (!value || typeof value !== "object") return false;
   const entry = value;
   return typeof entry.mtimeMs === "number" && Number.isFinite(entry.mtimeMs) && typeof entry.size === "number" && Number.isFinite(entry.size) && isFiniteOrNull(entry.takenAt) && isFiniteOrNull(entry.focalLength) && isFiniteOrNull(entry.focalLength35) && isFiniteOrNull(entry.aperture) && isFiniteOrNull(entry.shutterSeconds) && isFiniteOrNull(entry.iso);
 }
-async function loadCache(albumId2) {
-  const existing = caches.get(albumId2);
+async function loadCache$1(albumId2) {
+  const existing = caches$1.get(albumId2);
   if (existing) return existing;
   const cache2 = { entries: /* @__PURE__ */ new Map(), dirty: false };
-  caches.set(albumId2, cache2);
+  caches$1.set(albumId2, cache2);
   try {
-    const raw = await fs.readFile(cacheFile(albumId2), "utf8");
+    const raw = await fs.readFile(cacheFile$1(albumId2), "utf8");
     const parsed = JSON.parse(raw);
-    if (parsed.version === CACHE_VERSION$1 && parsed.entries && typeof parsed.entries === "object") {
+    if (parsed.version === CACHE_VERSION$2 && parsed.entries && typeof parsed.entries === "object") {
       for (const [id, entry] of Object.entries(parsed.entries)) {
-        if (isCachedEntry(entry)) cache2.entries.set(id, entry);
+        if (isCachedEntry$1(entry)) cache2.entries.set(id, entry);
       }
     }
   } catch (error) {
@@ -1844,8 +1844,8 @@ async function loadCache(albumId2) {
   }
   return cache2;
 }
-async function saveCache(albumId2, validIds) {
-  const cache2 = caches.get(albumId2);
+async function saveCache$1(albumId2, validIds) {
+  const cache2 = caches$1.get(albumId2);
   if (!cache2) return;
   for (const id of cache2.entries.keys()) {
     if (!validIds.has(id)) {
@@ -1857,11 +1857,11 @@ async function saveCache(albumId2, validIds) {
   cache2.dirty = false;
   const entries2 = {};
   for (const [id, entry] of cache2.entries) entries2[id] = entry;
-  const serialized = JSON.stringify({ version: CACHE_VERSION$1, entries: entries2 });
+  const serialized = JSON.stringify({ version: CACHE_VERSION$2, entries: entries2 });
   try {
-    const file = cacheFile(albumId2);
+    const file = cacheFile$1(albumId2);
     await fs.mkdir(path.dirname(file), { recursive: true });
-    const tempFile = `${file}.${process.pid}.${writeSequence++}.tmp`;
+    const tempFile = `${file}.${process.pid}.${writeSequence$1++}.tmp`;
     await fs.writeFile(tempFile, serialized, "utf8");
     await fs.rename(tempFile, file);
   } catch (error) {
@@ -1870,18 +1870,18 @@ async function saveCache(albumId2, validIds) {
   }
 }
 function flushExifCacheSync() {
-  for (const [albumId2, cache2] of caches) {
+  for (const [albumId2, cache2] of caches$1) {
     if (!cache2.dirty) continue;
     cache2.dirty = false;
     try {
       const entries2 = {};
       for (const [id, entry] of cache2.entries) entries2[id] = entry;
-      const file = cacheFile(albumId2);
+      const file = cacheFile$1(albumId2);
       fsSync.mkdirSync(path.dirname(file), { recursive: true });
-      const tempFile = `${file}.${process.pid}.${writeSequence++}.tmp`;
+      const tempFile = `${file}.${process.pid}.${writeSequence$1++}.tmp`;
       fsSync.writeFileSync(
         tempFile,
-        JSON.stringify({ version: CACHE_VERSION$1, entries: entries2 }),
+        JSON.stringify({ version: CACHE_VERSION$2, entries: entries2 }),
         "utf8"
       );
       fsSync.renameSync(tempFile, file);
@@ -1892,8 +1892,8 @@ function flushExifCacheSync() {
   }
 }
 function removeAlbumExifCache(albumId2) {
-  caches.delete(albumId2);
-  void fs.rm(cacheFile(albumId2), { force: true }).catch(() => void 0);
+  caches$1.delete(albumId2);
+  void fs.rm(cacheFile$1(albumId2), { force: true }).catch(() => void 0);
 }
 const EMPTY_FIELDS = {
   takenAt: null,
@@ -1929,7 +1929,7 @@ async function readStatsFields(file) {
   };
 }
 async function computeAlbumStats(albumId2, photos, onProgress) {
-  const cache2 = await loadCache(albumId2);
+  const cache2 = await loadCache$1(albumId2);
   const ids = photos.map((photo) => photoId(photo.path));
   const total = photos.length;
   const fields = new Array(total);
@@ -1942,7 +1942,7 @@ async function computeAlbumStats(albumId2, photos, onProgress) {
     onProgress(processed, total);
   };
   report(true);
-  await mapLimit(photos, READ_CONCURRENCY, async (photo, index) => {
+  await mapLimit(photos, READ_CONCURRENCY$1, async (photo, index) => {
     const id = ids[index];
     const cached = cache2.entries.get(id);
     if (cached && cached.mtimeMs === photo.mtimeMs && cached.size === photo.size) {
@@ -1961,7 +1961,7 @@ async function computeAlbumStats(albumId2, photos, onProgress) {
     report();
   });
   report(true);
-  await saveCache(albumId2, new Set(ids));
+  await saveCache$1(albumId2, new Set(ids));
   return aggregateStats(total, fields);
 }
 const FOCAL_BINS = [
@@ -2064,262 +2064,129 @@ function aggregateStats(photoCount, fields) {
     hours: sortedNumberBuckets(hourCounts, (value) => `${String(value).padStart(2, "0")}:00`)
   };
 }
-const LIBRARY_VERSION = 1;
-const SCAN_CONCURRENCY = 4;
-let records = [];
-let loaded = false;
-let persistQueue = Promise.resolve();
-let photosUpdatedHandler = null;
-const statsJobs = /* @__PURE__ */ new Map();
-function setPhotosUpdatedHandler(handler) {
-  photosUpdatedHandler = handler;
-}
-function libraryFile() {
-  return path.join(app.getPath("userData"), "library.json");
-}
-function albumId(filePath) {
-  return crypto.createHash("sha1").update(normalizePath(filePath)).digest("hex").slice(0, 16);
-}
-function toAlbum(record, summary) {
-  return {
-    id: record.id,
-    path: record.path,
-    name: record.name,
-    addedAt: record.addedAt,
-    photoCount: summary.photoCount,
-    coverThumbs: summary.coverThumbs,
-    missing: summary.missing
-  };
-}
-function isAlbumRecord(value) {
-  if (!value || typeof value !== "object") return false;
-  const record = value;
-  return typeof record.id === "string" && typeof record.path === "string";
-}
-async function loadLibrary() {
-  if (loaded) return;
-  loaded = true;
-  try {
-    const raw = await fs.readFile(libraryFile(), "utf8");
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed.albums)) return;
-    records = parsed.albums.filter(isAlbumRecord).map((record) => ({
-      id: record.id,
-      path: record.path,
-      name: typeof record.name === "string" && record.name ? record.name : path.basename(record.path),
-      addedAt: Number(record.addedAt) || Date.now()
-    }));
-  } catch (error) {
-    const code = error.code;
-    if (code !== "ENOENT") {
-      console.error("[library] failed to load library.json:", error);
+sharp.concurrency(1);
+const HASH_SIZE = 32;
+const DCT_SIZE = 8;
+const SIMILAR_THRESHOLD = 12;
+const SIMILAR_DIAMETER_SLACK = 2;
+const DCT_COS = (() => {
+  const table = new Float64Array(DCT_SIZE * HASH_SIZE);
+  for (let u2 = 0; u2 < DCT_SIZE; u2 += 1) {
+    const alpha = u2 === 0 ? Math.SQRT1_2 : 1;
+    for (let x2 = 0; x2 < HASH_SIZE; x2 += 1) {
+      table[u2 * HASH_SIZE + x2] = Math.cos((2 * x2 + 1) * u2 * Math.PI / (2 * HASH_SIZE)) * alpha;
     }
   }
-}
-function persist() {
-  const snapshot = { version: LIBRARY_VERSION, albums: records };
-  const serialized = JSON.stringify(snapshot, null, 2);
-  persistQueue = persistQueue.then(async () => {
-    const file = libraryFile();
-    await fs.mkdir(path.dirname(file), { recursive: true });
-    const tempFile = `${file}.${process.pid}.tmp`;
-    await fs.writeFile(tempFile, serialized, "utf8");
-    await fs.rename(tempFile, file);
-  }).catch((error) => {
-    console.error("[library] failed to save library.json:", error);
-  });
-  return persistQueue;
-}
-async function getAlbums() {
-  return mapLimit(records, SCAN_CONCURRENCY, async (record) => {
-    const summary = await getAlbumSummaryForLibrary(record.path);
-    return toAlbum(record, summary);
-  });
-}
-async function addAlbums(paths) {
-  const existing = new Set(records.map((record) => normalizePath(record.path)));
-  let added = 0;
-  let skipped = 0;
-  for (const rawPath of paths) {
-    const resolved = path.resolve(rawPath);
-    const normalized = normalizePath(resolved);
-    if (existing.has(normalized)) {
-      skipped += 1;
-      continue;
-    }
-    existing.add(normalized);
-    records.push({
-      id: albumId(resolved),
-      path: resolved,
-      name: path.basename(resolved) || resolved,
-      addedAt: Date.now()
-    });
-    added += 1;
+  return table;
+})();
+const POPCOUNT = (() => {
+  const table = new Uint8Array(1 << 16);
+  for (let value = 1; value < table.length; value += 1) {
+    table[value] = table[value >> 1] + (value & 1);
   }
-  if (added > 0) {
-    await persist();
+  return table;
+})();
+async function computePHash(input) {
+  const { data } = await sharp(input, { failOn: "none" }).rotate().resize(HASH_SIZE, HASH_SIZE, { fit: "fill" }).greyscale().raw().toBuffer({ resolveWithObject: true });
+  if (data.length < HASH_SIZE * HASH_SIZE) {
+    throw new Error("图像尺寸不足，无法计算指纹");
   }
-  return { albums: await getAlbums(), added, skipped };
+  return hashPixels(data);
 }
-async function removeAlbum(id) {
-  const removed = records.find((record) => record.id === id);
-  records = records.filter((record) => record.id !== id);
-  if (removed) {
-    removeCachedScan(removed.path);
-    removeAlbumExifCache(id);
-    await persist();
-  }
-  return getAlbums();
-}
-async function listPhotos(albumId2) {
-  const record = records.find((item) => item.id === albumId2);
-  if (!record) return [];
-  const scan = await getAlbumScan(record.path);
-  void revalidateAlbum(record.path).then((updated) => {
-    if (updated && photosUpdatedHandler) {
-      photosUpdatedHandler(albumId2, photosOfScan(updated));
-    }
-  }).catch((error) => {
-    console.error("[library] failed to revalidate album:", record.path, error);
-  });
-  return photosOfScan(scan);
-}
-function getAlbumStats(albumId2, listener) {
-  const record = records.find((item) => item.id === albumId2);
-  if (!record) return Promise.resolve(null);
-  const existing = statsJobs.get(albumId2);
-  if (existing) {
-    existing.listeners.add(listener);
-    return existing.promise;
-  }
-  const listeners = /* @__PURE__ */ new Set([listener]);
-  const onProgress = (processed, total) => {
-    for (const notify of listeners) notify(processed, total);
-  };
-  const promise = getAlbumScan(record.path).then(
-    (scan) => computeAlbumStats(albumId2, scan.photos, onProgress)
-  );
-  const job = { promise, listeners };
-  statsJobs.set(albumId2, job);
-  const cleanup = () => {
-    if (statsJobs.get(albumId2) === job) statsJobs.delete(albumId2);
-  };
-  promise.then(cleanup, cleanup);
-  return promise;
-}
-const EXIF_FIELDS = [
-  "Make",
-  "Model",
-  "LensModel",
-  "FocalLength",
-  "FocalLengthIn35mmFormat",
-  "FNumber",
-  "ExposureTime",
-  "ExposureBiasValue",
-  "ISO",
-  "ISOSpeedRatings",
-  "DateTimeOriginal",
-  "CreateDate",
-  "Orientation",
-  "ImageWidth",
-  "ImageHeight",
-  "ExifImageWidth",
-  "ExifImageHeight"
-];
-const CACHE_LIMIT = 300;
-const FORMAT_NAMES = { JPG: "JPEG", TIF: "TIFF" };
-const cache = /* @__PURE__ */ new Map();
-async function readPhotoDetails(file) {
-  const key = `${file.path}|${file.mtimeMs}|${file.size}`;
-  const cached = cache.get(key);
-  if (cached) {
-    cache.delete(key);
-    cache.set(key, cached);
-    return cached;
-  }
-  const details = await extractDetails(file);
-  cache.set(key, details);
-  while (cache.size > CACHE_LIMIT) {
-    const oldest = cache.keys().next().value;
-    if (oldest === void 0) break;
-    cache.delete(oldest);
-  }
-  return details;
-}
-async function extractDetails(file) {
-  let exif = null;
-  try {
-    const parsed = await tt.parse(file.path, {
-      pick: EXIF_FIELDS,
-      translateValues: false,
-      reviveValues: false
-    });
-    exif = parsed ?? null;
-  } catch (error) {
-    console.warn("[photo-info] 无法读取 EXIF:", file.path, error);
-  }
-  let orientation = toNumber(exif == null ? void 0 : exif.Orientation) ?? 1;
-  let width = toNumber(exif == null ? void 0 : exif.ExifImageWidth) ?? toNumber(exif == null ? void 0 : exif.ImageWidth);
-  let height = toNumber(exif == null ? void 0 : exif.ExifImageHeight) ?? toNumber(exif == null ? void 0 : exif.ImageHeight);
-  if (width === null || height === null) {
-    const meta = await readSharpMetadata(file.path);
-    if (meta) {
-      width = meta.width;
-      height = meta.height;
-      if (orientation === 1 && meta.orientation !== null) orientation = meta.orientation;
+function hashPixels(pixels) {
+  const rows = new Float64Array(HASH_SIZE * DCT_SIZE);
+  for (let y2 = 0; y2 < HASH_SIZE; y2 += 1) {
+    const rowOffset = y2 * HASH_SIZE;
+    for (let u2 = 0; u2 < DCT_SIZE; u2 += 1) {
+      let sum = 0;
+      const cosOffset = u2 * HASH_SIZE;
+      for (let x2 = 0; x2 < HASH_SIZE; x2 += 1) {
+        sum += pixels[rowOffset + x2] * DCT_COS[cosOffset + x2];
+      }
+      rows[y2 * DCT_SIZE + u2] = sum;
     }
   }
-  if (width !== null && height !== null && orientation >= 5 && orientation <= 8) {
-    [width, height] = [height, width];
+  const coefficients = new Float64Array(DCT_SIZE * DCT_SIZE);
+  for (let v2 = 0; v2 < DCT_SIZE; v2 += 1) {
+    const cosOffset = v2 * HASH_SIZE;
+    for (let u2 = 0; u2 < DCT_SIZE; u2 += 1) {
+      let sum = 0;
+      for (let y2 = 0; y2 < HASH_SIZE; y2 += 1) {
+        sum += rows[y2 * DCT_SIZE + u2] * DCT_COS[cosOffset + y2];
+      }
+      coefficients[v2 * DCT_SIZE + u2] = sum;
+    }
   }
-  const rawFormat = path.extname(file.path).slice(1).toUpperCase();
-  const make = cleanString(exif == null ? void 0 : exif.Make);
-  const model = cleanString(exif == null ? void 0 : exif.Model);
-  return {
-    width,
-    height,
-    format: FORMAT_NAMES[rawFormat] ?? rawFormat,
-    sizeBytes: file.size,
-    modifiedAt: file.mtimeMs,
-    takenAt: parseExifDate(exif == null ? void 0 : exif.DateTimeOriginal) ?? parseExifDate(exif == null ? void 0 : exif.CreateDate),
-    camera: joinCamera(make, model),
-    lens: cleanString(exif == null ? void 0 : exif.LensModel),
-    focalLength: toNumber(exif == null ? void 0 : exif.FocalLength),
-    focalLength35: toNumber(exif == null ? void 0 : exif.FocalLengthIn35mmFormat),
-    aperture: toNumber(exif == null ? void 0 : exif.FNumber),
-    shutterSeconds: toNumber(exif == null ? void 0 : exif.ExposureTime),
-    iso: toNumber(exif == null ? void 0 : exif.ISO) ?? toNumber(exif == null ? void 0 : exif.ISOSpeedRatings),
-    exposureBias: toNumber(exif == null ? void 0 : exif.ExposureBiasValue)
-  };
+  const sorted = Array.from(coefficients).sort((a2, b2) => a2 - b2);
+  const median = (sorted[31] + sorted[32]) / 2;
+  let hash = "";
+  for (let i2 = 0; i2 < coefficients.length; i2 += 4) {
+    let nibble = 0;
+    for (let bit = 0; bit < 4; bit += 1) {
+      nibble = nibble << 1 | (coefficients[i2 + bit] > median ? 1 : 0);
+    }
+    hash += nibble.toString(16);
+  }
+  return hash;
 }
-async function readSharpMetadata(filePath) {
-  if (path.extname(filePath).toLowerCase() === ".nef") return null;
-  try {
-    const meta = await sharp(filePath).metadata();
-    return {
-      width: meta.width ?? null,
-      height: meta.height ?? null,
-      orientation: meta.orientation ?? null
+function popcount(value) {
+  return POPCOUNT[value & 65535] + POPCOUNT[value >>> 16 & 65535];
+}
+function distanceBetween(a2, b2) {
+  return popcount(a2.hi ^ b2.hi) + popcount(a2.lo ^ b2.lo);
+}
+class IncrementalSimilarCluster {
+  constructor(threshold = SIMILAR_THRESHOLD) {
+    __publicField(this, "nodes", []);
+    __publicField(this, "groups", []);
+    __publicField(this, "threshold");
+    __publicField(this, "maxDistance");
+    this.threshold = threshold;
+    this.maxDistance = threshold + SIMILAR_DIAMETER_SLACK;
+  }
+  add(id, hash) {
+    const node = {
+      id,
+      hi: Number.parseInt(hash.slice(0, 8), 16) >>> 0,
+      lo: Number.parseInt(hash.slice(8, 16), 16) >>> 0
     };
-  } catch {
-    return null;
+    const index = this.nodes.length;
+    this.nodes.push(node);
+    let bestGroup = -1;
+    let bestMax = Number.POSITIVE_INFINITY;
+    let bestMin = Number.POSITIVE_INFINITY;
+    for (let groupIndex = 0; groupIndex < this.groups.length; groupIndex += 1) {
+      const members = this.groups[groupIndex];
+      let maxDistanceInGroup = 0;
+      let minDistanceInGroup = Number.POSITIVE_INFINITY;
+      let compatible = true;
+      for (const member of members) {
+        const distance = distanceBetween(node, this.nodes[member]);
+        if (distance > this.maxDistance) {
+          compatible = false;
+          break;
+        }
+        if (distance > maxDistanceInGroup) maxDistanceInGroup = distance;
+        if (distance < minDistanceInGroup) minDistanceInGroup = distance;
+      }
+      if (!compatible || minDistanceInGroup > this.threshold) continue;
+      if (maxDistanceInGroup < bestMax || maxDistanceInGroup === bestMax && minDistanceInGroup < bestMin) {
+        bestGroup = groupIndex;
+        bestMax = maxDistanceInGroup;
+        bestMin = minDistanceInGroup;
+      }
+    }
+    if (bestGroup >= 0) this.groups[bestGroup].push(index);
+    else this.groups.push([index]);
   }
-}
-function joinCamera(make, model) {
-  var _a;
-  if (!make) return model;
-  if (!model) return make;
-  const brand = (_a = make.split(/\s+/)[0]) == null ? void 0 : _a.toLowerCase();
-  return brand && model.toLowerCase().includes(brand) ? model : `${make} ${model}`;
-}
-function cleanString(value) {
-  if (typeof value !== "string") return null;
-  const trimmed = value.replace(/\0+$/, "").trim();
-  return trimmed || null;
+  /** 只返回至少两张照片的组；成员顺序为加入顺序 */
+  getGroups() {
+    return this.groups.filter((members) => members.length >= 2).map((members) => ({ photoIds: members.map((index) => this.nodes[index].id) }));
+  }
 }
 const SCHEME = "thumb";
 const THUMB_HOST = "photo";
-const CACHE_VERSION = "v1";
+const CACHE_VERSION$1 = "v1";
 const WIDTH_BUCKETS = [160, 320, 480, 640, 960, 1280, 1920];
 const DEFAULT_WIDTH = 320;
 const MAX_CONCURRENCY = Math.max(4, Math.min(8, os.availableParallelism()));
@@ -2493,7 +2360,7 @@ function pickPriority(raw, width) {
   return "grid";
 }
 function cacheKey(file, width) {
-  return crypto.createHash("sha1").update(`${file.path}|${file.mtimeMs}|${file.size}|${width}|${CACHE_VERSION}`).digest("hex");
+  return crypto.createHash("sha1").update(`${file.path}|${file.mtimeMs}|${file.size}|${width}|${CACHE_VERSION$1}`).digest("hex");
 }
 async function ensureThumbnail(file, width, priority) {
   const key = cacheKey(file, width);
@@ -2520,11 +2387,567 @@ async function loadImageInput(filePath) {
   if (path.extname(filePath).toLowerCase() !== ".nef") {
     return filePath;
   }
-  const preview = await extractThumbnail(filePath);
+  const preview = await extractThumbnail(filePath, { prefer: "largest" });
   if (!preview.found) {
     throw new Error(`NEF 没有可用的内嵌预览：${preview.reason}`);
   }
   return Buffer.from(preview.data);
+}
+const CACHE_VERSION = 1;
+const READ_CONCURRENCY = 4;
+const BATCH_SIZE = 8;
+const SNAPSHOT_INTERVAL_MS = 1e3;
+const CHECKPOINT_INTERVAL_MS = 5e3;
+const caches = /* @__PURE__ */ new Map();
+let writeSequence = 0;
+function cacheDir() {
+  return path.join(app.getPath("userData"), "similar-cache");
+}
+function cacheFile(albumId2) {
+  return path.join(cacheDir(), `${albumId2}.json`);
+}
+function isHash(value) {
+  return value === null || typeof value === "string" && /^[0-9a-f]{16}$/.test(value);
+}
+function isCachedEntry(value) {
+  if (!value || typeof value !== "object") return false;
+  const entry = value;
+  return typeof entry.mtimeMs === "number" && Number.isFinite(entry.mtimeMs) && typeof entry.size === "number" && Number.isFinite(entry.size) && isHash(entry.hash);
+}
+async function loadCache(albumId2) {
+  const existing = caches.get(albumId2);
+  if (existing) return existing;
+  const cache2 = { entries: /* @__PURE__ */ new Map(), dirty: false };
+  caches.set(albumId2, cache2);
+  try {
+    const raw = await fs.readFile(cacheFile(albumId2), "utf8");
+    const parsed = JSON.parse(raw);
+    if (parsed.version === CACHE_VERSION && parsed.entries && typeof parsed.entries === "object") {
+      for (const [id, entry] of Object.entries(parsed.entries)) {
+        if (isCachedEntry(entry)) cache2.entries.set(id, entry);
+      }
+    }
+  } catch (error) {
+    const code = error.code;
+    if (code !== "ENOENT") {
+      console.warn("[similar] failed to load cache:", albumId2, error);
+    }
+  }
+  return cache2;
+}
+async function saveCache(albumId2, validIds) {
+  const cache2 = caches.get(albumId2);
+  if (!cache2) return;
+  for (const id of cache2.entries.keys()) {
+    if (!validIds.has(id)) {
+      cache2.entries.delete(id);
+      cache2.dirty = true;
+    }
+  }
+  if (!cache2.dirty) return;
+  cache2.dirty = false;
+  const entries2 = {};
+  for (const [id, entry] of cache2.entries) entries2[id] = entry;
+  const serialized = JSON.stringify({ version: CACHE_VERSION, entries: entries2 });
+  try {
+    const file = cacheFile(albumId2);
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    const tempFile = `${file}.${process.pid}.${writeSequence++}.tmp`;
+    await fs.writeFile(tempFile, serialized, "utf8");
+    await fs.rename(tempFile, file);
+  } catch (error) {
+    cache2.dirty = true;
+    console.warn("[similar] failed to save cache:", albumId2, error);
+  }
+}
+function flushSimilarCacheSync() {
+  for (const [albumId2, cache2] of caches) {
+    if (!cache2.dirty) continue;
+    cache2.dirty = false;
+    try {
+      const entries2 = {};
+      for (const [id, entry] of cache2.entries) entries2[id] = entry;
+      const file = cacheFile(albumId2);
+      fsSync.mkdirSync(path.dirname(file), { recursive: true });
+      const tempFile = `${file}.${process.pid}.${writeSequence++}.tmp`;
+      fsSync.writeFileSync(
+        tempFile,
+        JSON.stringify({ version: CACHE_VERSION, entries: entries2 }),
+        "utf8"
+      );
+      fsSync.renameSync(tempFile, file);
+    } catch (error) {
+      cache2.dirty = true;
+      console.warn("[similar] failed to save cache on quit:", albumId2, error);
+    }
+  }
+}
+function removeAlbumSimilarCache(albumId2) {
+  caches.delete(albumId2);
+  void fs.rm(cacheFile(albumId2), { force: true }).catch(() => void 0);
+}
+async function readPhotoHash(file) {
+  try {
+    return await computePHash(await loadImageInput(file.path));
+  } catch {
+    return null;
+  }
+}
+class SimilarAnalysisJob {
+  constructor(albumId2, photos) {
+    __publicField(this, "albumId");
+    __publicField(this, "photos");
+    __publicField(this, "ids");
+    __publicField(this, "orderById", /* @__PURE__ */ new Map());
+    __publicField(this, "cluster", new IncrementalSimilarCluster());
+    __publicField(this, "listeners", /* @__PURE__ */ new Set());
+    __publicField(this, "cache", null);
+    __publicField(this, "pending", []);
+    __publicField(this, "processed", 0);
+    __publicField(this, "viewportStart", 0);
+    __publicField(this, "viewportEnd", 31);
+    __publicField(this, "stopped", false);
+    __publicField(this, "completed", false);
+    __publicField(this, "error", null);
+    __publicField(this, "latest", null);
+    __publicField(this, "lastSnapshotAt", 0);
+    __publicField(this, "lastCheckpointAt", 0);
+    __publicField(this, "running", null);
+    this.albumId = albumId2;
+    this.photos = photos;
+    this.ids = photos.map((photo) => photoId(photo.path));
+    for (let index = 0; index < this.ids.length; index += 1) {
+      this.orderById.set(this.ids[index], index);
+    }
+  }
+  addListener(listener) {
+    this.listeners.add(listener);
+    if (this.latest) listener(this.latest);
+  }
+  /** 渲染进程上报当前可见照片的下标范围，下一批优先处理附近未读照片 */
+  setViewport(start, end) {
+    if (this.photos.length === 0) return;
+    const lower = Math.max(0, Math.min(start, end));
+    const upper = Math.min(this.photos.length - 1, Math.max(start, end));
+    this.viewportStart = lower;
+    this.viewportEnd = Math.max(lower, upper);
+  }
+  start() {
+    if (!this.running) this.running = this.run();
+    return this.running;
+  }
+  /** 离开相册或关闭开关时调用；等在途批次结束后保存已有指纹 */
+  async pause() {
+    this.stopped = true;
+    try {
+      await this.running;
+    } catch {
+    }
+    this.listeners.clear();
+    if (this.cache) await saveCache(this.albumId, new Set(this.ids));
+  }
+  async run() {
+    try {
+      const cache2 = await loadCache(this.albumId);
+      if (this.stopped) return;
+      this.cache = cache2;
+      this.lastCheckpointAt = Date.now();
+      for (let index = 0; index < this.photos.length; index += 1) {
+        const photo = this.photos[index];
+        const id = this.ids[index];
+        const cached = cache2.entries.get(id);
+        if (cached && cached.mtimeMs === photo.mtimeMs && cached.size === photo.size) {
+          this.processed += 1;
+          if (cached.hash) this.cluster.add(id, cached.hash);
+        } else {
+          this.pending.push(index);
+        }
+      }
+      this.completed = this.pending.length === 0;
+      this.emit(true);
+      if (this.completed) {
+        await saveCache(this.albumId, new Set(this.ids));
+        return;
+      }
+      while (!this.stopped && this.pending.length > 0) {
+        const batch = this.takeBatch();
+        const hashes = await mapLimit(batch, READ_CONCURRENCY, async (index) => {
+          const photo = this.photos[index];
+          const id = this.ids[index];
+          const hash = await readPhotoHash(photo);
+          cache2.entries.set(id, { mtimeMs: photo.mtimeMs, size: photo.size, hash });
+          cache2.dirty = true;
+          return hash;
+        });
+        for (let offset = 0; offset < batch.length; offset += 1) {
+          const hash = hashes[offset];
+          if (hash) this.cluster.add(this.ids[batch[offset]], hash);
+          this.processed += 1;
+        }
+        await this.maybeCheckpoint();
+        if (!this.stopped) this.emit(false);
+      }
+      if (!this.stopped) {
+        this.completed = true;
+        this.emit(true);
+      }
+      await saveCache(this.albumId, new Set(this.ids));
+    } catch (error) {
+      console.error("[similar] analysis failed:", this.albumId, error);
+      this.error = "相似照片分析失败";
+      this.completed = true;
+      this.emit(true);
+      try {
+        await saveCache(this.albumId, new Set(this.ids));
+      } catch {
+      }
+    }
+  }
+  /** 选出离当前视口最近的一批未读照片，批内再按相册顺序处理 */
+  takeBatch() {
+    const start = this.viewportStart;
+    const end = this.viewportEnd;
+    const score = (index) => {
+      if (index < start) return start - index;
+      if (index > end) return index - end;
+      return 0;
+    };
+    this.pending.sort((a2, b2) => score(a2) - score(b2) || a2 - b2);
+    const batch = this.pending.splice(0, Math.min(BATCH_SIZE, this.pending.length));
+    batch.sort((a2, b2) => a2 - b2);
+    return batch;
+  }
+  async maybeCheckpoint() {
+    const now = Date.now();
+    if (now - this.lastCheckpointAt < CHECKPOINT_INTERVAL_MS) return;
+    this.lastCheckpointAt = now;
+    await saveCache(this.albumId, new Set(this.ids));
+  }
+  emit(force) {
+    const now = Date.now();
+    if (!force && now - this.lastSnapshotAt < SNAPSHOT_INTERVAL_MS) return;
+    this.lastSnapshotAt = now;
+    const groups = this.cluster.getGroups().map((group) => ({
+      // 组内按相册默认顺序排列，扑克牌封面与观赏窗口顺序保持稳定
+      photoIds: [...group.photoIds].sort(
+        (a2, b2) => (this.orderById.get(a2) ?? 0) - (this.orderById.get(b2) ?? 0)
+      )
+    }));
+    groups.sort(
+      (a2, b2) => (this.orderById.get(a2.photoIds[0]) ?? 0) - (this.orderById.get(b2.photoIds[0]) ?? 0)
+    );
+    const snapshot = {
+      albumId: this.albumId,
+      groups,
+      processed: this.processed,
+      total: this.photos.length,
+      complete: this.completed || this.pending.length === 0 && !this.stopped,
+      error: this.error
+    };
+    this.latest = snapshot;
+    for (const listener of this.listeners) {
+      try {
+        listener(snapshot);
+      } catch (error) {
+        console.warn("[similar] snapshot listener failed:", error);
+      }
+    }
+  }
+}
+const LIBRARY_VERSION = 1;
+const SCAN_CONCURRENCY = 4;
+let records = [];
+let loaded = false;
+let persistQueue = Promise.resolve();
+let photosUpdatedHandler = null;
+const statsJobs = /* @__PURE__ */ new Map();
+const similarJobs = /* @__PURE__ */ new Map();
+const similarStartTokens = /* @__PURE__ */ new Map();
+function nextSimilarToken(albumId2) {
+  const token = (similarStartTokens.get(albumId2) ?? 0) + 1;
+  similarStartTokens.set(albumId2, token);
+  return token;
+}
+function setPhotosUpdatedHandler(handler) {
+  photosUpdatedHandler = handler;
+}
+function libraryFile() {
+  return path.join(app.getPath("userData"), "library.json");
+}
+function albumId(filePath) {
+  return crypto.createHash("sha1").update(normalizePath(filePath)).digest("hex").slice(0, 16);
+}
+function toAlbum(record, summary) {
+  return {
+    id: record.id,
+    path: record.path,
+    name: record.name,
+    addedAt: record.addedAt,
+    photoCount: summary.photoCount,
+    coverThumbs: summary.coverThumbs,
+    missing: summary.missing
+  };
+}
+function isAlbumRecord(value) {
+  if (!value || typeof value !== "object") return false;
+  const record = value;
+  return typeof record.id === "string" && typeof record.path === "string";
+}
+async function loadLibrary() {
+  if (loaded) return;
+  loaded = true;
+  try {
+    const raw = await fs.readFile(libraryFile(), "utf8");
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed.albums)) return;
+    records = parsed.albums.filter(isAlbumRecord).map((record) => ({
+      id: record.id,
+      path: record.path,
+      name: typeof record.name === "string" && record.name ? record.name : path.basename(record.path),
+      addedAt: Number(record.addedAt) || Date.now()
+    }));
+  } catch (error) {
+    const code = error.code;
+    if (code !== "ENOENT") {
+      console.error("[library] failed to load library.json:", error);
+    }
+  }
+}
+function persist() {
+  const snapshot = { version: LIBRARY_VERSION, albums: records };
+  const serialized = JSON.stringify(snapshot, null, 2);
+  persistQueue = persistQueue.then(async () => {
+    const file = libraryFile();
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    const tempFile = `${file}.${process.pid}.tmp`;
+    await fs.writeFile(tempFile, serialized, "utf8");
+    await fs.rename(tempFile, file);
+  }).catch((error) => {
+    console.error("[library] failed to save library.json:", error);
+  });
+  return persistQueue;
+}
+async function getAlbums() {
+  return mapLimit(records, SCAN_CONCURRENCY, async (record) => {
+    const summary = await getAlbumSummaryForLibrary(record.path);
+    return toAlbum(record, summary);
+  });
+}
+async function addAlbums(paths) {
+  const existing = new Set(records.map((record) => normalizePath(record.path)));
+  let added = 0;
+  let skipped = 0;
+  for (const rawPath of paths) {
+    const resolved = path.resolve(rawPath);
+    const normalized = normalizePath(resolved);
+    if (existing.has(normalized)) {
+      skipped += 1;
+      continue;
+    }
+    existing.add(normalized);
+    records.push({
+      id: albumId(resolved),
+      path: resolved,
+      name: path.basename(resolved) || resolved,
+      addedAt: Date.now()
+    });
+    added += 1;
+  }
+  if (added > 0) {
+    await persist();
+  }
+  return { albums: await getAlbums(), added, skipped };
+}
+async function removeAlbum(id) {
+  const removed = records.find((record) => record.id === id);
+  records = records.filter((record) => record.id !== id);
+  if (removed) {
+    await pauseSimilarAnalysis(id);
+    removeCachedScan(removed.path);
+    removeAlbumExifCache(id);
+    removeAlbumSimilarCache(id);
+    await persist();
+  }
+  return getAlbums();
+}
+async function listPhotos(albumId2) {
+  const record = records.find((item) => item.id === albumId2);
+  if (!record) return [];
+  const scan = await getAlbumScan(record.path);
+  void revalidateAlbum(record.path).then((updated) => {
+    if (updated && photosUpdatedHandler) {
+      photosUpdatedHandler(albumId2, photosOfScan(updated));
+    }
+  }).catch((error) => {
+    console.error("[library] failed to revalidate album:", record.path, error);
+  });
+  return photosOfScan(scan);
+}
+function getAlbumStats(albumId2, listener) {
+  const record = records.find((item) => item.id === albumId2);
+  if (!record) return Promise.resolve(null);
+  const existing = statsJobs.get(albumId2);
+  if (existing) {
+    existing.listeners.add(listener);
+    return existing.promise;
+  }
+  const listeners = /* @__PURE__ */ new Set([listener]);
+  const onProgress = (processed, total) => {
+    for (const notify of listeners) notify(processed, total);
+  };
+  const promise = getAlbumScan(record.path).then(
+    (scan) => computeAlbumStats(albumId2, scan.photos, onProgress)
+  );
+  const job = { promise, listeners };
+  statsJobs.set(albumId2, job);
+  const cleanup = () => {
+    if (statsJobs.get(albumId2) === job) statsJobs.delete(albumId2);
+  };
+  promise.then(cleanup, cleanup);
+  return promise;
+}
+function startSimilarAnalysis(albumId2, listener) {
+  const record = records.find((item) => item.id === albumId2);
+  if (!record) return Promise.resolve();
+  const token = nextSimilarToken(albumId2);
+  const existing = similarJobs.get(albumId2);
+  if (existing) {
+    existing.addListener(listener);
+    return Promise.resolve();
+  }
+  return getAlbumScan(record.path).then((scan) => {
+    if (similarStartTokens.get(albumId2) !== token) return;
+    const current = similarJobs.get(albumId2);
+    if (current) {
+      current.addListener(listener);
+      return;
+    }
+    const job = new SimilarAnalysisJob(albumId2, scan.photos);
+    job.addListener(listener);
+    similarJobs.set(albumId2, job);
+    void job.start();
+  });
+}
+async function pauseSimilarAnalysis(albumId2) {
+  nextSimilarToken(albumId2);
+  const job = similarJobs.get(albumId2);
+  if (!job) return;
+  similarJobs.delete(albumId2);
+  await job.pause();
+}
+function setSimilarViewport(albumId2, start, end) {
+  var _a;
+  (_a = similarJobs.get(albumId2)) == null ? void 0 : _a.setViewport(start, end);
+}
+const EXIF_FIELDS = [
+  "Make",
+  "Model",
+  "LensModel",
+  "FocalLength",
+  "FocalLengthIn35mmFormat",
+  "FNumber",
+  "ExposureTime",
+  "ExposureBiasValue",
+  "ISO",
+  "ISOSpeedRatings",
+  "DateTimeOriginal",
+  "CreateDate",
+  "Orientation",
+  "ImageWidth",
+  "ImageHeight",
+  "ExifImageWidth",
+  "ExifImageHeight"
+];
+const CACHE_LIMIT = 300;
+const FORMAT_NAMES = { JPG: "JPEG", TIF: "TIFF" };
+const cache = /* @__PURE__ */ new Map();
+async function readPhotoDetails(file) {
+  const key = `${file.path}|${file.mtimeMs}|${file.size}`;
+  const cached = cache.get(key);
+  if (cached) {
+    cache.delete(key);
+    cache.set(key, cached);
+    return cached;
+  }
+  const details = await extractDetails(file);
+  cache.set(key, details);
+  while (cache.size > CACHE_LIMIT) {
+    const oldest = cache.keys().next().value;
+    if (oldest === void 0) break;
+    cache.delete(oldest);
+  }
+  return details;
+}
+async function extractDetails(file) {
+  let exif = null;
+  try {
+    const parsed = await tt.parse(file.path, {
+      pick: EXIF_FIELDS,
+      translateValues: false,
+      reviveValues: false
+    });
+    exif = parsed ?? null;
+  } catch (error) {
+    console.warn("[photo-info] 无法读取 EXIF:", file.path, error);
+  }
+  let orientation = toNumber(exif == null ? void 0 : exif.Orientation) ?? 1;
+  let width = toNumber(exif == null ? void 0 : exif.ExifImageWidth) ?? toNumber(exif == null ? void 0 : exif.ImageWidth);
+  let height = toNumber(exif == null ? void 0 : exif.ExifImageHeight) ?? toNumber(exif == null ? void 0 : exif.ImageHeight);
+  if (width === null || height === null) {
+    const meta = await readSharpMetadata(file.path);
+    if (meta) {
+      width = meta.width;
+      height = meta.height;
+      if (orientation === 1 && meta.orientation !== null) orientation = meta.orientation;
+    }
+  }
+  if (width !== null && height !== null && orientation >= 5 && orientation <= 8) {
+    [width, height] = [height, width];
+  }
+  const rawFormat = path.extname(file.path).slice(1).toUpperCase();
+  const make = cleanString(exif == null ? void 0 : exif.Make);
+  const model = cleanString(exif == null ? void 0 : exif.Model);
+  return {
+    width,
+    height,
+    format: FORMAT_NAMES[rawFormat] ?? rawFormat,
+    sizeBytes: file.size,
+    modifiedAt: file.mtimeMs,
+    takenAt: parseExifDate(exif == null ? void 0 : exif.DateTimeOriginal) ?? parseExifDate(exif == null ? void 0 : exif.CreateDate),
+    camera: joinCamera(make, model),
+    lens: cleanString(exif == null ? void 0 : exif.LensModel),
+    focalLength: toNumber(exif == null ? void 0 : exif.FocalLength),
+    focalLength35: toNumber(exif == null ? void 0 : exif.FocalLengthIn35mmFormat),
+    aperture: toNumber(exif == null ? void 0 : exif.FNumber),
+    shutterSeconds: toNumber(exif == null ? void 0 : exif.ExposureTime),
+    iso: toNumber(exif == null ? void 0 : exif.ISO) ?? toNumber(exif == null ? void 0 : exif.ISOSpeedRatings),
+    exposureBias: toNumber(exif == null ? void 0 : exif.ExposureBiasValue)
+  };
+}
+async function readSharpMetadata(filePath) {
+  if (path.extname(filePath).toLowerCase() === ".nef") return null;
+  try {
+    const meta = await sharp(filePath).metadata();
+    return {
+      width: meta.width ?? null,
+      height: meta.height ?? null,
+      orientation: meta.orientation ?? null
+    };
+  } catch {
+    return null;
+  }
+}
+function joinCamera(make, model) {
+  var _a;
+  if (!make) return model;
+  if (!model) return make;
+  const brand = (_a = make.split(/\s+/)[0]) == null ? void 0 : _a.toLowerCase();
+  return brand && model.toLowerCase().includes(brand) ? model : `${make} ${model}`;
+}
+function cleanString(value) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.replace(/\0+$/, "").trim();
+  return trimmed || null;
 }
 const __filename$1 = fileURLToPath(import.meta.url);
 const __dirname$1 = path.dirname(__filename$1);
@@ -2592,6 +3015,29 @@ function registerIpc() {
       }
     });
   });
+  ipcMain.handle("album:similar-start", (event, albumId2) => {
+    if (typeof albumId2 !== "string") throw new Error("无效的相册 id");
+    const sender = event.sender;
+    return startSimilarAnalysis(albumId2, (snapshot) => {
+      if (!sender.isDestroyed()) {
+        sender.send("album:similar-snapshot", snapshot);
+      }
+    });
+  });
+  ipcMain.handle("album:similar-pause", (_event, albumId2) => {
+    if (typeof albumId2 !== "string") throw new Error("无效的相册 id");
+    return pauseSimilarAnalysis(albumId2);
+  });
+  ipcMain.handle(
+    "album:similar-viewport",
+    (_event, albumId2, start, end) => {
+      if (typeof albumId2 !== "string") throw new Error("无效的相册 id");
+      if (typeof start !== "number" || typeof end !== "number") {
+        throw new Error("无效的视口范围");
+      }
+      setSimilarViewport(albumId2, start, end);
+    }
+  );
 }
 app.whenReady().then(async () => {
   Menu.setApplicationMenu(null);
@@ -2608,6 +3054,7 @@ app.whenReady().then(async () => {
 app.on("before-quit", () => {
   flushScanCacheSync();
   flushExifCacheSync();
+  flushSimilarCacheSync();
 });
 app.on("activate", () => {
   if (BrowserWindow.getAllWindows().length === 0) {

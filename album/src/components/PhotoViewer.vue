@@ -156,6 +156,7 @@
 
     <footer class="viewer__footer">
       <span class="viewer__name" :title="currentPhoto.name">{{ currentPhoto.name }}</span>
+      <span v-if="tag" class="viewer__tag">{{ tag }}</span>
       <span class="viewer__counter">{{ currentIndex + 1 }} / {{ photos.length }}</span>
       <button
         class="viewer__flip"
@@ -195,6 +196,8 @@ const props = defineProps<{
   photos: Photo[]
   /** 打开时定位到第几张（从 0 开始） */
   startIndex: number
+  /** 观赏范围标签，如「相似 4 张」；普通浏览为空 */
+  tag?: string
 }>()
 
 const emit = defineEmits<{ close: [] }>()

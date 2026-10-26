@@ -7,13 +7,17 @@ import {
   getAlbums,
   listPhotos,
   loadLibrary,
+  pauseSimilarAnalysis,
   removeAlbum,
-  setPhotosUpdatedHandler
+  setPhotosUpdatedHandler,
+  setSimilarViewport,
+  startSimilarAnalysis
 } from './library'
 import { flushExifCacheSync } from './exifStats'
 import { readPhotoDetails } from './photoInfo'
 import { getPhotoFile } from './photos'
 import { flushScanCacheSync, loadScanCache } from './scanCache'
+import { flushSimilarCacheSync } from './similarity'
 import { installThumbProtocol, registerThumbScheme, setThumbnailScope } from './thumbnails'
 
 const __filename = fileURLToPath(import.meta.url)
@@ -98,6 +102,32 @@ function registerIpc(): void {
       }
     })
   })
+
+  ipcMain.handle('album:similar-start', (event, albumId: unknown) => {
+    if (typeof albumId !== 'string') throw new Error('无效的相册 id')
+    const sender = event.sender
+    return startSimilarAnalysis(albumId, (snapshot) => {
+      if (!sender.isDestroyed()) {
+        sender.send('album:similar-snapshot', snapshot)
+      }
+    })
+  })
+
+  ipcMain.handle('album:similar-pause', (_event, albumId: unknown) => {
+    if (typeof albumId !== 'string') throw new Error('无效的相册 id')
+    return pauseSimilarAnalysis(albumId)
+  })
+
+  ipcMain.handle(
+    'album:similar-viewport',
+    (_event, albumId: unknown, start: unknown, end: unknown) => {
+      if (typeof albumId !== 'string') throw new Error('无效的相册 id')
+      if (typeof start !== 'number' || typeof end !== 'number') {
+        throw new Error('无效的视口范围')
+      }
+      setSimilarViewport(albumId, start, end)
+    }
+  )
 }
 
 app.whenReady().then(async () => {
@@ -119,6 +149,7 @@ app.whenReady().then(async () => {
 app.on('before-quit', () => {
   flushScanCacheSync()
   flushExifCacheSync()
+  flushSimilarCacheSync()
 })
 
 app.on('activate', () => {

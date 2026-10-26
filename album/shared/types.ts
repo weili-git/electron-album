@@ -99,6 +99,24 @@ export interface AlbumStatsProgress {
   total: number
 }
 
+/** 一组视觉上相似的照片（至少两张） */
+export interface SimilarGroup {
+  /** 组内照片 id，按相册默认顺序（创建时间倒序）排列 */
+  photoIds: string[]
+}
+
+/** 相似照片分析的渐进快照；分析过程中会多次推送，组只会增长 */
+export interface SimilarSnapshot {
+  albumId: string
+  groups: SimilarGroup[]
+  processed: number
+  total: number
+  /** 整本相册的指纹都已处理（或分析出错终止） */
+  complete: boolean
+  /** 分析出错时的提示，正常为 null */
+  error: string | null
+}
+
 /** preload 暴露给渲染进程的 API */
 export interface AlbumApi {
   /** 打开选择目录对话框；取消时返回 null */
@@ -112,6 +130,14 @@ export interface AlbumApi {
   getAlbumStats(albumId: string): Promise<AlbumStats | null>
   /** 订阅 EXIF 统计进度；同一时间只保留一个订阅 */
   onAlbumStatsProgress(callback: (event: AlbumStatsProgress) => void): void
+  /** 开始或继续相似分析；结果通过 onSimilarSnapshot 渐进推送 */
+  startSimilarAnalysis(albumId: string): Promise<void>
+  /** 暂停分析并保存已经计算出的指纹 */
+  pauseSimilarAnalysis(albumId: string): Promise<void>
+  /** 告知主进程当前可见照片的下标范围，用于优先计算屏幕附近 */
+  setSimilarViewport(albumId: string, start: number, end: number): Promise<void>
+  /** 订阅相似分析快照；同一时间只保留一个订阅 */
+  onSimilarSnapshot(callback: (event: SimilarSnapshot) => void): void
   /** 按需读取照片详情；照片已不在登记表中时返回 null */
   getPhotoDetails(photoId: string): Promise<PhotoDetails | null>
   /** 订阅后台扫描结果；同一时间只保留一个订阅 */

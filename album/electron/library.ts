@@ -5,6 +5,11 @@ import crypto from 'node:crypto'
 import type { AddAlbumsResult, Album, AlbumStats, Photo } from '../shared/types'
 import { computeAlbumStats, removeAlbumExifCache } from './exifStats'
 import {
+  removeAlbumSimilarCache,
+  SimilarAnalysisJob,
+  type SimilarSnapshotListener
+} from './similarity'
+import {
   getAlbumScan,
   getAlbumSummaryForLibrary,
   photosOfScan,
@@ -46,6 +51,17 @@ interface StatsJob {
 
 /** 同一相册的统计只跑一次；面板关闭后重开可以复用正在进行的任务 */
 const statsJobs = new Map<string, StatsJob>()
+
+/** 相似分析按相册合并；任务会持续推送渐进分组，暂停后从缓存继续 */
+const similarJobs = new Map<string, SimilarAnalysisJob>()
+/** 防止 start 扫描期间用户已经暂停，扫描结束后又启动旧任务 */
+const similarStartTokens = new Map<string, number>()
+
+function nextSimilarToken(albumId: string): number {
+  const token = (similarStartTokens.get(albumId) ?? 0) + 1
+  similarStartTokens.set(albumId, token)
+  return token
+}
 
 /** 后台重扫发现照片变化时，由主进程转发给渲染进程 */
 export function setPhotosUpdatedHandler(handler: PhotosUpdatedHandler | null): void {
@@ -162,8 +178,10 @@ export async function removeAlbum(id: string): Promise<Album[]> {
   const removed = records.find((record) => record.id === id)
   records = records.filter((record) => record.id !== id)
   if (removed) {
+    await pauseSimilarAnalysis(id)
     removeCachedScan(removed.path)
     removeAlbumExifCache(id)
+    removeAlbumSimilarCache(id)
     await persist()
   }
   return getAlbums()
@@ -221,4 +239,54 @@ export function getAlbumStats(
   promise.then(cleanup, cleanup)
 
   return promise
+}
+
+/**
+ * 开始或继续相册的相似分析。已有任务直接复用并补发最新快照；
+ * 新任务会在后台按视口顺序计算指纹，并持续推送渐进分组。
+ */
+export function startSimilarAnalysis(
+  albumId: string,
+  listener: SimilarSnapshotListener
+): Promise<void> {
+  const record = records.find((item) => item.id === albumId)
+  if (!record) return Promise.resolve()
+
+  const token = nextSimilarToken(albumId)
+  const existing = similarJobs.get(albumId)
+  if (existing) {
+    existing.addListener(listener)
+    return Promise.resolve()
+  }
+
+  return getAlbumScan(record.path).then((scan) => {
+    // 扫描期间可能已经暂停或发起了新的 start，旧请求直接丢弃
+    if (similarStartTokens.get(albumId) !== token) return
+
+    const current = similarJobs.get(albumId)
+    if (current) {
+      current.addListener(listener)
+      return
+    }
+
+    const job = new SimilarAnalysisJob(albumId, scan.photos)
+    job.addListener(listener)
+    similarJobs.set(albumId, job)
+    void job.start()
+  })
+}
+
+/** 暂停并保存当前相册已经计算出的指纹；再次开始会复用缓存 */
+export async function pauseSimilarAnalysis(albumId: string): Promise<void> {
+  // 使仍在扫描/排队中的 start 失效
+  nextSimilarToken(albumId)
+  const job = similarJobs.get(albumId)
+  if (!job) return
+  similarJobs.delete(albumId)
+  await job.pause()
+}
+
+/** 当前可见范围变化时，让任务下一批优先处理屏幕附近的照片 */
+export function setSimilarViewport(albumId: string, start: number, end: number): void {
+  similarJobs.get(albumId)?.setViewport(start, end)
 }

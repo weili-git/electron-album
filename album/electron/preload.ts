@@ -1,9 +1,17 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
-import type { AlbumApi, AlbumStatsProgress, PhotosUpdatedEvent } from '../shared/types'
+import type {
+  AlbumApi,
+  AlbumStatsProgress,
+  PhotosUpdatedEvent,
+  SimilarSnapshot
+} from '../shared/types'
 
 let photosUpdatedListener: ((event: IpcRendererEvent, payload: PhotosUpdatedEvent) => void) | null = null
 let statsProgressListener:
   | ((event: IpcRendererEvent, payload: AlbumStatsProgress) => void)
+  | null = null
+let similarSnapshotListener:
+  | ((event: IpcRendererEvent, payload: SimilarSnapshot) => void)
   | null = null
 
 const api: AlbumApi = {
@@ -19,6 +27,17 @@ const api: AlbumApi = {
     }
     statsProgressListener = (_event, payload: AlbumStatsProgress) => callback(payload)
     ipcRenderer.on('album:stats-progress', statsProgressListener)
+  },
+  startSimilarAnalysis: (albumId) => ipcRenderer.invoke('album:similar-start', albumId),
+  pauseSimilarAnalysis: (albumId) => ipcRenderer.invoke('album:similar-pause', albumId),
+  setSimilarViewport: (albumId, start, end) =>
+    ipcRenderer.invoke('album:similar-viewport', albumId, start, end),
+  onSimilarSnapshot: (callback) => {
+    if (similarSnapshotListener) {
+      ipcRenderer.removeListener('album:similar-snapshot', similarSnapshotListener)
+    }
+    similarSnapshotListener = (_event, payload: SimilarSnapshot) => callback(payload)
+    ipcRenderer.on('album:similar-snapshot', similarSnapshotListener)
   },
   getPhotoDetails: (photoId) => ipcRenderer.invoke('photo:details', photoId),
   // 只保留一个订阅，避免热更新重挂载时重复监听

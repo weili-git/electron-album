@@ -295,13 +295,16 @@ async function ensureThumbnail(
   return task
 }
 
-/** NEF 无法被 sharp 直接解码，改为提取相机写入的内嵌 JPEG/PNG 预览 */
-async function loadImageInput(filePath: string): Promise<string | Buffer> {
+/**
+ * NEF 无法被 sharp 直接解码，改为提取相机写入的内嵌 JPEG/PNG 预览。
+ * 相似照片分析也复用这条管线，保证 RAW 与缩略图看到的是同一张图。
+ */
+export async function loadImageInput(filePath: string): Promise<string | Buffer> {
   if (path.extname(filePath).toLowerCase() !== '.nef') {
     return filePath
   }
 
-  const preview = await extractThumbnail(filePath)
+  const preview = await extractThumbnail(filePath, { prefer: 'largest' })
   if (!preview.found) {
     throw new Error(`NEF 没有可用的内嵌预览：${preview.reason}`)
   }
