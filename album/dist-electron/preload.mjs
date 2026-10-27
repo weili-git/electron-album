@@ -9,6 +9,7 @@ const api = {
   removeAlbum: (id) => electron.ipcRenderer.invoke("album:remove", id),
   listPhotos: (albumId) => electron.ipcRenderer.invoke("album:photos", albumId),
   setThumbnailScope: (albumPath) => electron.ipcRenderer.invoke("thumb:set-scope", albumPath),
+  setThumbnailViewport: (photoIds) => electron.ipcRenderer.invoke("thumb:set-viewport", photoIds),
   getAlbumStats: (albumId) => electron.ipcRenderer.invoke("album:stats", albumId),
   onAlbumStatsProgress: (callback) => {
     if (statsProgressListener) {
@@ -19,6 +20,7 @@ const api = {
   },
   startSimilarAnalysis: (albumId) => electron.ipcRenderer.invoke("album:similar-start", albumId),
   pauseSimilarAnalysis: (albumId) => electron.ipcRenderer.invoke("album:similar-pause", albumId),
+  setSimilarForeground: (albumId, foreground) => electron.ipcRenderer.invoke("album:similar-foreground", albumId, foreground),
   setSimilarViewport: (albumId, start, end) => electron.ipcRenderer.invoke("album:similar-viewport", albumId, start, end),
   onSimilarSnapshot: (callback) => {
     if (similarSnapshotListener) {

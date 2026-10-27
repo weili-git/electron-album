@@ -20,6 +20,7 @@ const api: AlbumApi = {
   removeAlbum: (id) => ipcRenderer.invoke('album:remove', id),
   listPhotos: (albumId) => ipcRenderer.invoke('album:photos', albumId),
   setThumbnailScope: (albumPath) => ipcRenderer.invoke('thumb:set-scope', albumPath),
+  setThumbnailViewport: (photoIds) => ipcRenderer.invoke('thumb:set-viewport', photoIds),
   getAlbumStats: (albumId) => ipcRenderer.invoke('album:stats', albumId),
   onAlbumStatsProgress: (callback) => {
     if (statsProgressListener) {
@@ -30,6 +31,8 @@ const api: AlbumApi = {
   },
   startSimilarAnalysis: (albumId) => ipcRenderer.invoke('album:similar-start', albumId),
   pauseSimilarAnalysis: (albumId) => ipcRenderer.invoke('album:similar-pause', albumId),
+  setSimilarForeground: (albumId, foreground) =>
+    ipcRenderer.invoke('album:similar-foreground', albumId, foreground),
   setSimilarViewport: (albumId, start, end) =>
     ipcRenderer.invoke('album:similar-viewport', albumId, start, end),
   onSimilarSnapshot: (callback) => {

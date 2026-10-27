@@ -6,7 +6,7 @@ import os from 'node:os'
 import { pathToFileURL } from 'node:url'
 import sharp from 'sharp'
 import { extractThumbnail } from 'extract-raw-preview'
-import { getPhotoFile, type PhotoFile } from './photos'
+import { getPhotoFile, GRID_THUMB_WIDTH, photoId, type PhotoFile } from './photos'
 import { normalizePath } from './util'
 
 const SCHEME = 'thumb'
@@ -14,18 +14,19 @@ const THUMB_HOST = 'photo'
 const CACHE_VERSION = 'v1'
 /** 缩略图宽度档位，避免任意宽度导致缓存膨胀 */
 const WIDTH_BUCKETS = [160, 320, 480, 640, 960, 1280, 1920]
-const DEFAULT_WIDTH = 320
+const DEFAULT_WIDTH = GRID_THUMB_WIDTH
 /** 兼顾吞吐与风扇/磁盘压力，最多 8 个并发生成 */
 const MAX_CONCURRENCY = Math.max(4, Math.min(8, os.availableParallelism()))
 /** 每个 sharp 任务内部单线程，避免与外部并发叠加造成 CPU 超订 */
 sharp.concurrency(1)
 
 /**
- * 缩略图用途：观赏窗口 > 网格 > 相册封面。
- * 队列按该顺序取任务，避免封面生成阻塞用户刚打开的照片。
+ * 缩略图用途：观赏窗口 > 屏幕内网格/分析 > 分析预读 > 其余网格 > 相册封面。
+ * 分析只复用网格缩略图，因此它和显示请求是同一份任务，不会再解码一次原图；
+ * 把分析排在普通网格之前，快速滚动时跳过的行不会拖住分析窗口。
  */
-type ThumbPriority = 'view' | 'grid' | 'cover'
-const PRIORITY_ORDER: ThumbPriority[] = ['view', 'grid', 'cover']
+type ThumbPriority = 'view' | 'grid' | 'analysis' | 'cover'
+const PRIORITY_ORDER: ThumbPriority[] = ['view', 'grid', 'analysis', 'cover']
 
 class ThumbnailDroppedError extends Error {
   constructor() {
@@ -37,6 +38,8 @@ class ThumbnailDroppedError extends Error {
 interface QueueEntry {
   /** 照片所属相册目录，用于切换视图时丢弃旧任务 */
   scope: string
+  /** 照片 id，用于让屏幕内照片优先于快速滚动时跳过的行 */
+  photoId?: string
   start: () => void
   reject: (error: unknown) => void
 }
@@ -46,15 +49,32 @@ class ThumbnailQueue {
   private readonly queues: Record<ThumbPriority, QueueEntry[]> = {
     view: [],
     grid: [],
+    analysis: [],
     cover: []
   }
+  /** 当前屏幕（真实可视区）内的照片 id；由渲染进程滚动后上报 */
+  private visible = new Set<string>()
 
   constructor(private readonly max: number) {}
 
-  run<T>(priority: ThumbPriority, scope: string, task: () => Promise<T>): Promise<T> {
+  setVisible(ids: Iterable<string>): void {
+    this.visible = new Set(ids)
+  }
+
+  clearVisible(): void {
+    this.visible.clear()
+  }
+
+  run<T>(
+    priority: ThumbPriority,
+    scope: string,
+    task: () => Promise<T>,
+    photoId?: string
+  ): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       const entry: QueueEntry = {
         scope,
+        photoId,
         reject,
         start: () => {
           this.active += 1
@@ -96,13 +116,41 @@ class ThumbnailQueue {
   }
 
   private startNext(): void {
-    for (const priority of PRIORITY_ORDER) {
-      const entry = this.queues[priority].shift()
-      if (entry) {
-        entry.start()
-        return
-      }
+    // 观赏窗口的请求永远最先处理
+    const view = this.queues.view.shift()
+    if (view) {
+      view.start()
+      return
     }
+
+    // 屏幕内照片优先：分析预读的照片滚进屏幕后也要立刻提到前面
+    const visible = this.takeVisible('grid') ?? this.takeVisible('analysis')
+    if (visible) {
+      visible.start()
+      return
+    }
+
+    // 分析预读窗口先于快速滚动时跳过的行；那些行等滚回来再生成
+    const analysis = this.queues.analysis.shift()
+    if (analysis) {
+      analysis.start()
+      return
+    }
+
+    const grid = this.queues.grid.shift()
+    if (grid) {
+      grid.start()
+      return
+    }
+
+    this.queues.cover.shift()?.start()
+  }
+
+  private takeVisible(priority: ThumbPriority): QueueEntry | undefined {
+    const queue = this.queues[priority]
+    if (queue.length === 0 || this.visible.size === 0) return undefined
+    const index = queue.findIndex((entry) => entry.photoId && this.visible.has(entry.photoId))
+    return index >= 0 ? queue.splice(index, 1)[0] : undefined
   }
 }
 
@@ -120,7 +168,13 @@ let activeScope: string | null | undefined
 /** 由渲染进程在进入/离开相册时调用，取消上一视图排队中的缩略图任务 */
 export function setThumbnailScope(albumPath: string | null): void {
   activeScope = albumPath === null ? null : normalizePath(albumPath)
+  limiter.clearVisible()
   limiter.dropInactive(isScopeActive)
+}
+
+/** 渲染进程上报真实可视区内的照片 id，网格缩略图优先处理这些照片 */
+export function setThumbnailViewport(ids: string[]): void {
+  limiter.setVisible(ids)
 }
 
 function isScopeActive(scope: string, priority: ThumbPriority): boolean {
@@ -278,6 +332,7 @@ async function ensureThumbnail(
   // 刚切走的视图可能还有少量请求在路上，直接放弃
   if (!isScopeActive(scope, priority)) throw new ThumbnailDroppedError()
 
+  const id = photoId(file.path)
   const task = limiter
     .run(priority, scope, async () => {
       await fs.mkdir(path.dirname(cachePath), { recursive: true })
@@ -288,7 +343,7 @@ async function ensureThumbnail(
         .webp({ quality: 82 })
         .toFile(cachePath)
       return cachePath
-    })
+    }, id)
     .finally(() => inFlight.delete(key))
 
   inFlight.set(key, task)
@@ -296,10 +351,26 @@ async function ensureThumbnail(
 }
 
 /**
- * NEF 无法被 sharp 直接解码，改为提取相机写入的内嵌 JPEG/PNG 预览。
- * 相似照片分析也复用这条管线，保证 RAW 与缩略图看到的是同一张图。
+ * 相似分析复用网格缩略图：宽度与网格一致，共用磁盘缓存与 inFlight 去重，
+ * 因此不会为了算哈希再解码一次原图。任务以 analysis 优先级排队。
  */
-export async function loadImageInput(filePath: string): Promise<string | Buffer> {
+export function getAnalysisThumbnail(file: PhotoFile): Promise<string> {
+  return ensureThumbnail(file, GRID_THUMB_WIDTH, 'analysis')
+}
+
+/**
+ * 切换相册/视图时排队中的缩略图任务会被主动取消。
+ * 分析侧需要把它和“图片无法解码”区分开，避免把取消误记成坏图。
+ */
+export function isThumbnailDropped(error: unknown): boolean {
+  return error instanceof ThumbnailDroppedError
+}
+
+/**
+ * NEF 无法被 sharp 直接解码，改为提取相机写入的内嵌 JPEG/PNG 预览。
+ * 相似照片分析复用所生成的缩略图，因此 RAW 与网格看到的是同一张图。
+ */
+async function loadImageInput(filePath: string): Promise<string | Buffer> {
   if (path.extname(filePath).toLowerCase() !== '.nef') {
     return filePath
   }

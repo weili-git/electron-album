@@ -24,10 +24,12 @@ export const IMAGE_EXTENSIONS = new Set([
 ])
 
 const THUMB_HOST = 'photo'
+/** 网格照片与相似分析共用的缩略图宽度 */
+export const GRID_THUMB_WIDTH = 320
 /** 缓存超过该时长后，打开相册会在后台重新扫描，以发现原地修改的文件 */
 const REVALIDATE_TTL_MS = 5 * 60 * 1000
 
-/** 缩略图用途决定生成优先级：观赏 > 网格 > 相册封面 */
+/** 缩略图 URL 类型：观赏 > 网格 > 相册封面；相似分析复用网格缩略图 */
 export type ThumbKind = 'view' | 'grid' | 'cover'
 
 export interface PhotoFile {
@@ -292,7 +294,7 @@ function toPhoto(photo: PhotoFile): Photo {
     id,
     name: photo.name,
     createdAt: photo.createdAt,
-    thumbUrl: makeThumbUrl(id, 320, photo.mtimeMs, 'grid'),
+    thumbUrl: makeThumbUrl(id, GRID_THUMB_WIDTH, photo.mtimeMs, 'grid'),
     viewUrl: makeThumbUrl(id, 1920, photo.mtimeMs, 'view'),
     originalUrl: makeOriginalUrl(id, photo.mtimeMs)
   }

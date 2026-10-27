@@ -105,14 +105,24 @@ export interface SimilarGroup {
   photoIds: string[]
 }
 
-/** 相似照片分析的渐进快照；分析过程中会多次推送，组只会增长 */
+/**
+ * 相似照片分析的渐进快照；分析过程中会多次推送，组只会增长。
+ * 整本相册恰好全部分析完时会做一次组级合并，完成快照的组数或成员可能发生变化。
+ */
 export interface SimilarSnapshot {
   albumId: string
   groups: SimilarGroup[]
+  /** 整本相册中已处理的照片数（含缓存命中与解码失败） */
   processed: number
   total: number
-  /** 整本相册的指纹都已处理（或分析出错终止） */
+  /** 当前浏览窗口内已无待办 */
   complete: boolean
+  /** 整本相册的所有照片都已处理 */
+  albumComplete: boolean
+  /** 当前浏览窗口内的待分析张数 */
+  windowPending: number
+  /** 当前浏览窗口的总张数 */
+  windowTotal: number
   /** 分析出错时的提示，正常为 null */
   error: string | null
 }
@@ -126,15 +136,19 @@ export interface AlbumApi {
   listPhotos(albumId: string): Promise<Photo[]>
   /** 告知主进程当前可见的相册目录（null 表示相册库首页），用于取消旧视图的缩略图任务 */
   setThumbnailScope(albumPath: string | null): Promise<void>
+  /** 告知主进程当前屏幕内可见的照片 id，缩略图队列优先处理这些照片 */
+  setThumbnailViewport(photoIds: string[]): Promise<void>
   /** 读取相册的 EXIF 统计；首次读取逐张解析，之后使用缓存 */
   getAlbumStats(albumId: string): Promise<AlbumStats | null>
   /** 订阅 EXIF 统计进度；同一时间只保留一个订阅 */
   onAlbumStatsProgress(callback: (event: AlbumStatsProgress) => void): void
-  /** 开始或继续相似分析；结果通过 onSimilarSnapshot 渐进推送 */
+  /** 开始或继续当前窗口的相似分析；结果通过 onSimilarSnapshot 渐进推送 */
   startSimilarAnalysis(albumId: string): Promise<void>
-  /** 暂停分析并保存已经计算出的指纹 */
+  /** 停止分析并保存已经计算出的指纹（离开相册或关闭相似合并时调用） */
   pauseSimilarAnalysis(albumId: string): Promise<void>
-  /** 告知主进程当前可见照片的下标范围，用于优先计算屏幕附近 */
+  /** 观赏窗口/细看层打开时让分析在批次间让路，关闭后继续 */
+  setSimilarForeground(albumId: string, foreground: boolean): Promise<void>
+  /** 告知主进程当前可见照片的下标范围，用于决定窗口与优先顺序 */
   setSimilarViewport(albumId: string, start: number, end: number): Promise<void>
   /** 订阅相似分析快照；同一时间只保留一个订阅 */
   onSimilarSnapshot(callback: (event: SimilarSnapshot) => void): void

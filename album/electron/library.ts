@@ -243,7 +243,7 @@ export function getAlbumStats(
 
 /**
  * 开始或继续相册的相似分析。已有任务直接复用并补发最新快照；
- * 新任务会在后台按视口顺序计算指纹，并持续推送渐进分组。
+ * 只处理当前视口窗口，滚动到哪分析到哪，不主动全量扫描。
  */
 export function startSimilarAnalysis(
   albumId: string,
@@ -252,13 +252,13 @@ export function startSimilarAnalysis(
   const record = records.find((item) => item.id === albumId)
   if (!record) return Promise.resolve()
 
-  const token = nextSimilarToken(albumId)
   const existing = similarJobs.get(albumId)
   if (existing) {
     existing.addListener(listener)
     return Promise.resolve()
   }
 
+  const token = nextSimilarToken(albumId)
   return getAlbumScan(record.path).then((scan) => {
     // 扫描期间可能已经暂停或发起了新的 start，旧请求直接丢弃
     if (similarStartTokens.get(albumId) !== token) return
@@ -276,7 +276,7 @@ export function startSimilarAnalysis(
   })
 }
 
-/** 暂停并保存当前相册已经计算出的指纹；再次开始会复用缓存 */
+/** 停止并保存当前相册已经计算出的指纹；再次开始会复用缓存 */
 export async function pauseSimilarAnalysis(albumId: string): Promise<void> {
   // 使仍在扫描/排队中的 start 失效
   nextSimilarToken(albumId)
@@ -286,7 +286,12 @@ export async function pauseSimilarAnalysis(albumId: string): Promise<void> {
   await job.pause()
 }
 
-/** 当前可见范围变化时，让任务下一批优先处理屏幕附近的照片 */
+/** 当前可见范围变化时，重划任务的分析窗口 */
 export function setSimilarViewport(albumId: string, start: number, end: number): void {
   similarJobs.get(albumId)?.setViewport(start, end)
+}
+
+/** 观赏窗口/细看层打开时让分析让路，关闭后自动继续 */
+export function setSimilarForeground(albumId: string, foreground: boolean): void {
+  similarJobs.get(albumId)?.setForeground(foreground)
 }

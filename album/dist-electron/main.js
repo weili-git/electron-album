@@ -1611,6 +1611,7 @@ const IMAGE_EXTENSIONS = /* @__PURE__ */ new Set([
   ".nef"
 ]);
 const THUMB_HOST$1 = "photo";
+const GRID_THUMB_WIDTH = 320;
 const REVALIDATE_TTL_MS = 5 * 60 * 1e3;
 const registry = /* @__PURE__ */ new Map();
 const revalidating = /* @__PURE__ */ new Map();
@@ -1786,7 +1787,7 @@ function toPhoto(photo) {
     id,
     name: photo.name,
     createdAt: photo.createdAt,
-    thumbUrl: makeThumbUrl(id, 320, photo.mtimeMs, "grid"),
+    thumbUrl: makeThumbUrl(id, GRID_THUMB_WIDTH, photo.mtimeMs, "grid"),
     viewUrl: makeThumbUrl(id, 1920, photo.mtimeMs, "view"),
     originalUrl: makeOriginalUrl(id, photo.mtimeMs)
   };
@@ -2067,7 +2068,11 @@ function aggregateStats(photoCount, fields) {
 sharp.concurrency(1);
 const HASH_SIZE = 32;
 const DCT_SIZE = 8;
-const SIMILAR_THRESHOLD = 12;
+const COLOR_GRID_SIZE = 4;
+const COLOR_BLOCK_SIZE = HASH_SIZE / COLOR_GRID_SIZE;
+const COLOR_VALUE_COUNT = COLOR_GRID_SIZE * COLOR_GRID_SIZE * 3;
+const SIMILAR_THRESHOLD = 18;
+const SIMILAR_COLOR_THRESHOLD = 30;
 const SIMILAR_DIAMETER_SLACK = 2;
 const DCT_COS = (() => {
   const table = new Float64Array(DCT_SIZE * HASH_SIZE);
@@ -2086,12 +2091,34 @@ const POPCOUNT = (() => {
   }
   return table;
 })();
-async function computePHash(input) {
-  const { data } = await sharp(input, { failOn: "none" }).rotate().resize(HASH_SIZE, HASH_SIZE, { fit: "fill" }).greyscale().raw().toBuffer({ resolveWithObject: true });
-  if (data.length < HASH_SIZE * HASH_SIZE) {
+async function computeSignature(input) {
+  const { data, info } = await sharp(input, { failOn: "none" }).rotate().resize(HASH_SIZE, HASH_SIZE, { fit: "fill" }).removeAlpha().toColourspace("srgb").raw({ depth: "uchar" }).toBuffer({ resolveWithObject: true });
+  const pixelCount = HASH_SIZE * HASH_SIZE;
+  const channels = info.channels;
+  if (data.length < pixelCount * Math.min(channels, 3)) {
     throw new Error("图像尺寸不足，无法计算指纹");
   }
-  return hashPixels(data);
+  const luma = new Uint8Array(pixelCount);
+  const colorSums = new Float64Array(COLOR_VALUE_COUNT);
+  for (let index = 0; index < pixelCount; index += 1) {
+    const offset = index * channels;
+    const r2 = data[offset];
+    const g2 = channels >= 3 ? data[offset + 1] : r2;
+    const b2 = channels >= 3 ? data[offset + 2] : r2;
+    luma[index] = Math.round(0.299 * r2 + 0.587 * g2 + 0.114 * b2);
+    const x2 = index % HASH_SIZE;
+    const y2 = index / HASH_SIZE | 0;
+    const block = (y2 / COLOR_BLOCK_SIZE | 0) * COLOR_GRID_SIZE + (x2 / COLOR_BLOCK_SIZE | 0);
+    colorSums[block * 3] += r2;
+    colorSums[block * 3 + 1] += g2;
+    colorSums[block * 3 + 2] += b2;
+  }
+  const pixelsPerBlock = COLOR_BLOCK_SIZE * COLOR_BLOCK_SIZE;
+  const color = new Array(COLOR_VALUE_COUNT);
+  for (let index = 0; index < COLOR_VALUE_COUNT; index += 1) {
+    color[index] = Math.round(colorSums[index] / pixelsPerBlock);
+  }
+  return { hash: hashPixels(luma), color };
 }
 function hashPixels(pixels) {
   const rows = new Float64Array(HASH_SIZE * DCT_SIZE);
@@ -2129,27 +2156,42 @@ function hashPixels(pixels) {
   }
   return hash;
 }
+function colorDistance(a2, b2) {
+  const length = Math.min(a2.length, b2.length);
+  if (length < 3) return 0;
+  let total = 0;
+  for (let index = 0; index + 2 < length; index += 3) {
+    total += Math.abs(a2[index] - b2[index]) + Math.abs(a2[index + 1] - b2[index + 1]) + Math.abs(a2[index + 2] - b2[index + 2]);
+  }
+  return total / (length / 3) / 3;
+}
 function popcount(value) {
   return POPCOUNT[value & 65535] + POPCOUNT[value >>> 16 & 65535];
+}
+function toNode(id, signature) {
+  return {
+    id,
+    hi: Number.parseInt(signature.hash.slice(0, 8), 16) >>> 0,
+    lo: Number.parseInt(signature.hash.slice(8, 16), 16) >>> 0,
+    color: signature.color
+  };
 }
 function distanceBetween(a2, b2) {
   return popcount(a2.hi ^ b2.hi) + popcount(a2.lo ^ b2.lo);
 }
 class IncrementalSimilarCluster {
-  constructor(threshold = SIMILAR_THRESHOLD) {
+  constructor(options = {}) {
     __publicField(this, "nodes", []);
     __publicField(this, "groups", []);
     __publicField(this, "threshold");
     __publicField(this, "maxDistance");
-    this.threshold = threshold;
-    this.maxDistance = threshold + SIMILAR_DIAMETER_SLACK;
+    __publicField(this, "colorThreshold");
+    this.threshold = options.threshold ?? SIMILAR_THRESHOLD;
+    this.maxDistance = options.diameter ?? this.threshold + SIMILAR_DIAMETER_SLACK;
+    this.colorThreshold = options.colorThreshold ?? SIMILAR_COLOR_THRESHOLD;
   }
-  add(id, hash) {
-    const node = {
-      id,
-      hi: Number.parseInt(hash.slice(0, 8), 16) >>> 0,
-      lo: Number.parseInt(hash.slice(8, 16), 16) >>> 0
-    };
+  add(id, signature) {
+    const node = toNode(id, signature);
     const index = this.nodes.length;
     this.nodes.push(node);
     let bestGroup = -1;
@@ -2161,8 +2203,9 @@ class IncrementalSimilarCluster {
       let minDistanceInGroup = Number.POSITIVE_INFINITY;
       let compatible = true;
       for (const member of members) {
-        const distance = distanceBetween(node, this.nodes[member]);
-        if (distance > this.maxDistance) {
+        const other = this.nodes[member];
+        const distance = distanceBetween(node, other);
+        if (distance > this.maxDistance || colorDistance(node.color, other.color) > this.colorThreshold) {
           compatible = false;
           break;
         }
@@ -2179,19 +2222,162 @@ class IncrementalSimilarCluster {
     if (bestGroup >= 0) this.groups[bestGroup].push(index);
     else this.groups.push([index]);
   }
-  /** 只返回至少两张照片的组；成员顺序为加入顺序 */
-  getGroups() {
-    return this.groups.filter((members) => members.length >= 2).map((members) => ({ photoIds: members.map((index) => this.nodes[index].id) }));
+  /** 成员顺序为加入顺序；默认只返回至少两张照片的组 */
+  getGroups(includeSingletons = false) {
+    return this.groups.filter((members) => includeSingletons || members.length >= 2).map((members) => ({ photoIds: members.map((index) => this.nodes[index].id) }));
   }
+}
+const MERGE_DEFAULTS = {
+  hashThreshold: 20,
+  colorThreshold: 30,
+  colorFraction: 0.5,
+  timeGapMs: 5 * 60 * 1e3,
+  timeSpanMs: 30 * 60 * 1e3,
+  diameterP95: 26,
+  diameterMax: 32,
+  sampleSize: 24,
+  prefilterSampleSize: 4
+};
+function sampleEven(items, limit) {
+  if (items.length <= limit) return [...items];
+  const result = [];
+  for (let index = 0; index < limit; index += 1) {
+    result.push(items[Math.round(index * (items.length - 1) / (limit - 1))]);
+  }
+  return result;
+}
+function minTimeGap(a2, b2) {
+  let i2 = 0;
+  let j2 = 0;
+  let best = Number.POSITIVE_INFINITY;
+  while (i2 < a2.length && j2 < b2.length) {
+    const distance = Math.abs(a2[i2] - b2[j2]);
+    if (distance < best) best = distance;
+    if (a2[i2] < b2[j2]) i2 += 1;
+    else j2 += 1;
+  }
+  return best;
+}
+function mergeSimilarGroups(groups, signatures, times, options = {}) {
+  const config = { ...MERGE_DEFAULTS, ...options };
+  const nodeById = /* @__PURE__ */ new Map();
+  const getNode = (id) => {
+    const existing = nodeById.get(id);
+    if (existing) return existing;
+    const signature = signatures.get(id);
+    const time = times.get(id);
+    if (!signature || time === void 0) return null;
+    const node = { ...toNode(id, signature), time };
+    nodeById.set(id, node);
+    return node;
+  };
+  let current = groups.map((group) => group.photoIds.filter((id) => getNode(id) !== null)).filter((ids) => ids.length > 0);
+  if (current.length < 2) return current.map((photoIds) => ({ photoIds }));
+  let timeLists = [];
+  let timeRanges = [];
+  const refreshTimes = () => {
+    timeLists = current.map((ids) => ids.map((id) => nodeById.get(id).time).sort((a2, b2) => a2 - b2));
+    timeRanges = timeLists.map((list) => ({ min: list[0], max: list[list.length - 1] }));
+  };
+  refreshTimes();
+  const shouldMerge = (a2, b2) => {
+    if (minTimeGap(timeLists[a2], timeLists[b2]) > config.timeGapMs) return false;
+    if (Math.max(timeRanges[a2].max, timeRanges[b2].max) - Math.min(timeRanges[a2].min, timeRanges[b2].min) > config.timeSpanMs) {
+      return false;
+    }
+    const groupA = current[a2];
+    const groupB = current[b2];
+    const preA = sampleEven(groupA, config.prefilterSampleSize).map((id) => nodeById.get(id));
+    const preB = sampleEven(groupB, config.prefilterSampleSize).map((id) => nodeById.get(id));
+    let prefilterMin = Number.POSITIVE_INFINITY;
+    for (const left of preA) {
+      for (const right of preB) {
+        prefilterMin = Math.min(prefilterMin, distanceBetween(left, right));
+      }
+    }
+    if (prefilterMin > config.hashThreshold) return false;
+    const sampleA = sampleEven(groupA, config.sampleSize).map((id) => nodeById.get(id));
+    const sampleB = sampleEven(groupB, config.sampleSize).map((id) => nodeById.get(id));
+    const distances = [];
+    let colorPass = 0;
+    for (const left of sampleA) {
+      for (const right of sampleB) {
+        const distance = distanceBetween(left, right);
+        distances.push(distance);
+        if (distance <= config.hashThreshold && colorDistance(left.color, right.color) <= config.colorThreshold) {
+          colorPass += 1;
+        }
+      }
+    }
+    distances.sort((x2, y2) => x2 - y2);
+    if (distances[Math.floor(distances.length / 2)] > config.hashThreshold) return false;
+    if (colorPass / distances.length < config.colorFraction) return false;
+    const unionSample = sampleEven(
+      [...groupA, ...groupB],
+      config.sampleSize
+    ).map((id) => nodeById.get(id));
+    const unionDistances = [];
+    for (let left = 0; left < unionSample.length; left += 1) {
+      for (let right = left + 1; right < unionSample.length; right += 1) {
+        unionDistances.push(distanceBetween(unionSample[left], unionSample[right]));
+      }
+    }
+    unionDistances.sort((x2, y2) => x2 - y2);
+    if (unionDistances[Math.floor(unionDistances.length * 0.95)] > config.diameterP95) {
+      return false;
+    }
+    return unionDistances[unionDistances.length - 1] <= config.diameterMax;
+  };
+  for (let round = 0; round < 6; round += 1) {
+    const parent = Int32Array.from({ length: current.length }, (_2, index) => index);
+    const find = (index) => {
+      let root = index;
+      while (parent[root] !== root) root = parent[root];
+      while (parent[index] !== index) {
+        const next = parent[index];
+        parent[index] = root;
+        index = next;
+      }
+      return root;
+    };
+    const union = (a2, b2) => {
+      const rootA = find(a2);
+      const rootB = find(b2);
+      if (rootA === rootB) return false;
+      parent[rootB] = rootA;
+      return true;
+    };
+    let changed = false;
+    for (let a2 = 0; a2 < current.length; a2 += 1) {
+      for (let b2 = a2 + 1; b2 < current.length; b2 += 1) {
+        if (find(a2) === find(b2)) continue;
+        if (current[a2].length === 1 && current[b2].length === 1) continue;
+        if (!shouldMerge(a2, b2)) continue;
+        union(a2, b2);
+        changed = true;
+      }
+    }
+    if (!changed) break;
+    const merged = /* @__PURE__ */ new Map();
+    for (let index = 0; index < current.length; index += 1) {
+      const root = find(index);
+      const target = merged.get(root);
+      if (target) target.push(...current[index]);
+      else merged.set(root, [...current[index]]);
+    }
+    current = [...merged.values()];
+    refreshTimes();
+  }
+  return current.map((photoIds) => ({ photoIds }));
 }
 const SCHEME = "thumb";
 const THUMB_HOST = "photo";
 const CACHE_VERSION$1 = "v1";
 const WIDTH_BUCKETS = [160, 320, 480, 640, 960, 1280, 1920];
-const DEFAULT_WIDTH = 320;
+const DEFAULT_WIDTH = GRID_THUMB_WIDTH;
 const MAX_CONCURRENCY = Math.max(4, Math.min(8, os.availableParallelism()));
 sharp.concurrency(1);
-const PRIORITY_ORDER = ["view", "grid", "cover"];
+const PRIORITY_ORDER = ["view", "grid", "analysis", "cover"];
 class ThumbnailDroppedError extends Error {
   constructor() {
     super("thumbnail request no longer visible");
@@ -2204,14 +2390,24 @@ class ThumbnailQueue {
     __publicField(this, "queues", {
       view: [],
       grid: [],
+      analysis: [],
       cover: []
     });
+    /** 当前屏幕（真实可视区）内的照片 id；由渲染进程滚动后上报 */
+    __publicField(this, "visible", /* @__PURE__ */ new Set());
     this.max = max;
   }
-  run(priority, scope, task) {
+  setVisible(ids) {
+    this.visible = new Set(ids);
+  }
+  clearVisible() {
+    this.visible.clear();
+  }
+  run(priority, scope, task, photoId2) {
     return new Promise((resolve, reject) => {
       const entry = {
         scope,
+        photoId: photoId2,
         reject,
         start: () => {
           this.active += 1;
@@ -2247,13 +2443,34 @@ class ThumbnailQueue {
     }
   }
   startNext() {
-    for (const priority of PRIORITY_ORDER) {
-      const entry = this.queues[priority].shift();
-      if (entry) {
-        entry.start();
-        return;
-      }
+    var _a;
+    const view = this.queues.view.shift();
+    if (view) {
+      view.start();
+      return;
     }
+    const visible = this.takeVisible("grid") ?? this.takeVisible("analysis");
+    if (visible) {
+      visible.start();
+      return;
+    }
+    const analysis = this.queues.analysis.shift();
+    if (analysis) {
+      analysis.start();
+      return;
+    }
+    const grid = this.queues.grid.shift();
+    if (grid) {
+      grid.start();
+      return;
+    }
+    (_a = this.queues.cover.shift()) == null ? void 0 : _a.start();
+  }
+  takeVisible(priority) {
+    const queue = this.queues[priority];
+    if (queue.length === 0 || this.visible.size === 0) return void 0;
+    const index = queue.findIndex((entry) => entry.photoId && this.visible.has(entry.photoId));
+    return index >= 0 ? queue.splice(index, 1)[0] : void 0;
   }
 }
 const limiter = new ThumbnailQueue(MAX_CONCURRENCY);
@@ -2261,7 +2478,11 @@ const inFlight = /* @__PURE__ */ new Map();
 let activeScope;
 function setThumbnailScope(albumPath) {
   activeScope = albumPath === null ? null : normalizePath(albumPath);
+  limiter.clearVisible();
   limiter.dropInactive(isScopeActive);
+}
+function setThumbnailViewport(ids) {
+  limiter.setVisible(ids);
 }
 function isScopeActive(scope, priority) {
   if (activeScope === void 0) return true;
@@ -2374,14 +2595,21 @@ async function ensureThumbnail(file, width, priority) {
   }
   const scope = scopeOf(file);
   if (!isScopeActive(scope, priority)) throw new ThumbnailDroppedError();
+  const id = photoId(file.path);
   const task = limiter.run(priority, scope, async () => {
     await fs.mkdir(path.dirname(cachePath), { recursive: true });
     const input = await loadImageInput(file.path);
     await sharp(input).rotate().resize({ width, withoutEnlargement: true }).webp({ quality: 82 }).toFile(cachePath);
     return cachePath;
-  }).finally(() => inFlight.delete(key));
+  }, id).finally(() => inFlight.delete(key));
   inFlight.set(key, task);
   return task;
+}
+function getAnalysisThumbnail(file) {
+  return ensureThumbnail(file, GRID_THUMB_WIDTH, "analysis");
+}
+function isThumbnailDropped(error) {
+  return error instanceof ThumbnailDroppedError;
 }
 async function loadImageInput(filePath) {
   if (path.extname(filePath).toLowerCase() !== ".nef") {
@@ -2393,11 +2621,18 @@ async function loadImageInput(filePath) {
   }
   return Buffer.from(preview.data);
 }
-const CACHE_VERSION = 1;
+const CACHE_VERSION = 3;
 const READ_CONCURRENCY = 4;
 const BATCH_SIZE = 8;
+const WINDOW_MARGIN_RATIO = 0.3;
+const WINDOW_MARGIN_MIN = 12;
+const WINDOW_MARGIN_MAX = 32;
+const VIEWPORT_SETTLE_MS = 250;
 const SNAPSHOT_INTERVAL_MS = 1e3;
 const CHECKPOINT_INTERVAL_MS = 5e3;
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 const caches = /* @__PURE__ */ new Map();
 let writeSequence = 0;
 function cacheDir() {
@@ -2409,10 +2644,15 @@ function cacheFile(albumId2) {
 function isHash(value) {
   return value === null || typeof value === "string" && /^[0-9a-f]{16}$/.test(value);
 }
+function isColor(value) {
+  return value === null || Array.isArray(value) && value.length === 48 && value.every(
+    (channel) => Number.isInteger(channel) && channel >= 0 && channel <= 255
+  );
+}
 function isCachedEntry(value) {
   if (!value || typeof value !== "object") return false;
   const entry = value;
-  return typeof entry.mtimeMs === "number" && Number.isFinite(entry.mtimeMs) && typeof entry.size === "number" && Number.isFinite(entry.size) && isHash(entry.hash);
+  return typeof entry.mtimeMs === "number" && Number.isFinite(entry.mtimeMs) && typeof entry.size === "number" && Number.isFinite(entry.size) && isHash(entry.hash) && isColor(entry.color) && entry.hash === null === (entry.color === null);
 }
 async function loadCache(albumId2) {
   const existing = caches.get(albumId2);
@@ -2486,10 +2726,11 @@ function removeAlbumSimilarCache(albumId2) {
   caches.delete(albumId2);
   void fs.rm(cacheFile(albumId2), { force: true }).catch(() => void 0);
 }
-async function readPhotoHash(file) {
+async function readPhotoSignature(file) {
   try {
-    return await computePHash(await loadImageInput(file.path));
-  } catch {
+    return await computeSignature(await getAnalysisThumbnail(file));
+  } catch (error) {
+    if (isThumbnailDropped(error)) throw error;
     return null;
   }
 }
@@ -2499,38 +2740,63 @@ class SimilarAnalysisJob {
     __publicField(this, "photos");
     __publicField(this, "ids");
     __publicField(this, "orderById", /* @__PURE__ */ new Map());
+    __publicField(this, "signatures", /* @__PURE__ */ new Map());
+    __publicField(this, "timeById", /* @__PURE__ */ new Map());
     __publicField(this, "cluster", new IncrementalSimilarCluster());
     __publicField(this, "listeners", /* @__PURE__ */ new Set());
     __publicField(this, "cache", null);
-    __publicField(this, "pending", []);
+    /** 整本相册中还没有指纹的索引；只在当前窗口内选取 */
+    __publicField(this, "pending", /* @__PURE__ */ new Set());
     __publicField(this, "processed", 0);
     __publicField(this, "viewportStart", 0);
     __publicField(this, "viewportEnd", 31);
+    /** 最近一次视口变化时间；滚动期间让分析等待，先满足缩略图读盘 */
+    __publicField(this, "lastViewportSignalAt", 0);
+    __publicField(this, "foreground", false);
     __publicField(this, "stopped", false);
-    __publicField(this, "completed", false);
+    __publicField(this, "albumComplete", false);
+    /** 缓存吸收完成前不推送快照，避免 pending 尚未建立时误报“已完成” */
+    __publicField(this, "initialized", false);
+    /** 窗口空闲时只强制推送一次快照，避免每次唤醒都重复通知 */
+    __publicField(this, "idleEmitted", false);
     __publicField(this, "error", null);
+    /** 整本相册全部有指纹后的最终分组；未完成时为 null，直接使用增量聚类结果 */
+    __publicField(this, "finalGroups", null);
     __publicField(this, "latest", null);
     __publicField(this, "lastSnapshotAt", 0);
     __publicField(this, "lastCheckpointAt", 0);
     __publicField(this, "running", null);
+    __publicField(this, "wake", null);
     this.albumId = albumId2;
     this.photos = photos;
     this.ids = photos.map((photo) => photoId(photo.path));
     for (let index = 0; index < this.ids.length; index += 1) {
       this.orderById.set(this.ids[index], index);
+      this.timeById.set(this.ids[index], photos[index].mtimeMs);
     }
   }
   addListener(listener) {
     this.listeners.add(listener);
     if (this.latest) listener(this.latest);
   }
-  /** 渲染进程上报当前可见照片的下标范围，下一批优先处理附近未读照片 */
+  /** 渲染进程上报当前可见照片的下标范围；据此重新划定分析窗口 */
   setViewport(start, end) {
     if (this.photos.length === 0) return;
-    const lower = Math.max(0, Math.min(start, end));
-    const upper = Math.min(this.photos.length - 1, Math.max(start, end));
+    const lower = Math.max(0, Math.min(start, end, this.photos.length - 1));
+    const upper = Math.max(lower, Math.min(this.photos.length - 1, Math.max(start, end)));
+    const changed = lower !== this.viewportStart || upper !== this.viewportEnd;
     this.viewportStart = lower;
-    this.viewportEnd = Math.max(lower, upper);
+    this.viewportEnd = upper;
+    if (!changed) return;
+    this.lastViewportSignalAt = Date.now();
+    this.idleEmitted = false;
+    this.wakeUp();
+  }
+  /** 观赏窗口打开时让路，关闭后继续；不改变分析结果 */
+  setForeground(foreground) {
+    if (this.foreground === foreground) return;
+    this.foreground = foreground;
+    if (!foreground) this.wakeUp();
   }
   start() {
     if (!this.running) this.running = this.run();
@@ -2539,12 +2805,26 @@ class SimilarAnalysisJob {
   /** 离开相册或关闭开关时调用；等在途批次结束后保存已有指纹 */
   async pause() {
     this.stopped = true;
+    this.wakeUp();
     try {
       await this.running;
     } catch {
     }
     this.listeners.clear();
     if (this.cache) await saveCache(this.albumId, new Set(this.ids));
+  }
+  /** 唤醒正在等待窗口/前台状态的 run 循环 */
+  wakeUp() {
+    const resolve = this.wake;
+    if (!resolve) return;
+    this.wake = null;
+    resolve();
+  }
+  waitForWake() {
+    if (this.stopped) return Promise.resolve();
+    return new Promise((resolve) => {
+      this.wake = resolve;
+    });
   }
   async run() {
     try {
@@ -2558,44 +2838,67 @@ class SimilarAnalysisJob {
         const cached = cache2.entries.get(id);
         if (cached && cached.mtimeMs === photo.mtimeMs && cached.size === photo.size) {
           this.processed += 1;
-          if (cached.hash) this.cluster.add(id, cached.hash);
+          if (cached.hash && cached.color) {
+            const signature = { hash: cached.hash, color: cached.color };
+            this.signatures.set(id, signature);
+            this.cluster.add(id, signature);
+          }
         } else {
-          this.pending.push(index);
+          this.pending.add(index);
         }
       }
-      this.completed = this.pending.length === 0;
+      this.initialized = true;
+      this.updateCompletion();
       this.emit(true);
-      if (this.completed) {
+      this.idleEmitted = true;
+      if (this.albumComplete) {
         await saveCache(this.albumId, new Set(this.ids));
-        return;
       }
-      while (!this.stopped && this.pending.length > 0) {
-        const batch = this.takeBatch();
-        const hashes = await mapLimit(batch, READ_CONCURRENCY, async (index) => {
-          const photo = this.photos[index];
+      while (!this.stopped) {
+        if (this.foreground) {
+          await this.waitForWake();
+          continue;
+        }
+        const settle = this.lastViewportSignalAt + VIEWPORT_SETTLE_MS - Date.now();
+        if (settle > 0) {
+          await sleep(settle);
+          continue;
+        }
+        const { results: batch, aborted } = await this.readBatch();
+        if (batch.length === 0) {
+          if (!aborted && !this.idleEmitted) {
+            this.idleEmitted = true;
+            this.emit(true);
+          }
+          await this.waitForWake();
+          continue;
+        }
+        this.idleEmitted = false;
+        batch.sort((a2, b2) => a2.index - b2.index);
+        for (const { index, signature } of batch) {
           const id = this.ids[index];
-          const hash = await readPhotoHash(photo);
-          cache2.entries.set(id, { mtimeMs: photo.mtimeMs, size: photo.size, hash });
-          cache2.dirty = true;
-          return hash;
-        });
-        for (let offset = 0; offset < batch.length; offset += 1) {
-          const hash = hashes[offset];
-          if (hash) this.cluster.add(this.ids[batch[offset]], hash);
+          if (signature) {
+            this.signatures.set(id, signature);
+            this.cluster.add(id, signature);
+          }
           this.processed += 1;
         }
+        const wasComplete = this.albumComplete;
+        this.updateCompletion();
         await this.maybeCheckpoint();
+        if (this.albumComplete && !wasComplete) {
+          await saveCache(this.albumId, new Set(this.ids));
+        }
         if (!this.stopped) this.emit(false);
-      }
-      if (!this.stopped) {
-        this.completed = true;
-        this.emit(true);
+        if (aborted) await this.waitForWake();
       }
       await saveCache(this.albumId, new Set(this.ids));
     } catch (error) {
       console.error("[similar] analysis failed:", this.albumId, error);
       this.error = "相似照片分析失败";
-      this.completed = true;
+      this.albumComplete = true;
+      this.initialized = true;
+      this.idleEmitted = true;
       this.emit(true);
       try {
         await saveCache(this.albumId, new Set(this.ids));
@@ -2603,19 +2906,91 @@ class SimilarAnalysisJob {
       }
     }
   }
-  /** 选出离当前视口最近的一批未读照片，批内再按相册顺序处理 */
-  takeBatch() {
-    const start = this.viewportStart;
-    const end = this.viewportEnd;
-    const score = (index) => {
-      if (index < start) return start - index;
-      if (index > end) return index - end;
-      return 0;
+  /** 当前分析范围：可视区 ± 半屏 */
+  windowBounds() {
+    if (this.photos.length === 0) return { start: 0, end: -1 };
+    const viewportSize = Math.max(1, this.viewportEnd - this.viewportStart + 1);
+    const margin = Math.min(
+      WINDOW_MARGIN_MAX,
+      Math.max(WINDOW_MARGIN_MIN, Math.ceil(viewportSize * WINDOW_MARGIN_RATIO))
+    );
+    return {
+      start: Math.max(0, this.viewportStart - margin),
+      end: Math.min(this.photos.length - 1, this.viewportEnd + margin)
     };
-    this.pending.sort((a2, b2) => score(a2) - score(b2) || a2 - b2);
-    const batch = this.pending.splice(0, Math.min(BATCH_SIZE, this.pending.length));
-    batch.sort((a2, b2) => a2 - b2);
-    return batch;
+  }
+  /** 整本照片都有指纹后，计算一次最终分组 */
+  updateCompletion() {
+    if (this.albumComplete || this.pending.size > 0) return;
+    this.albumComplete = true;
+    this.finalGroups = this.buildFinalGroups();
+  }
+  /** 当前窗口内离可视区最近的一张待读照片；每读一张都重新判断，滚动后可立刻转向 */
+  takeNext() {
+    if (this.pending.size === 0) return void 0;
+    const { start, end } = this.windowBounds();
+    const viewStart = this.viewportStart;
+    const viewEnd = this.viewportEnd;
+    let best;
+    let bestScore = Number.POSITIVE_INFINITY;
+    for (const index of this.pending) {
+      if (index < start || index > end) continue;
+      const score = index < viewStart ? viewStart - index : index > viewEnd ? index - viewEnd : 0;
+      if (score < bestScore || score === bestScore && best !== void 0 && index < best) {
+        best = index;
+        bestScore = score;
+      }
+    }
+    if (best !== void 0) this.pending.delete(best);
+    return best;
+  }
+  /**
+   * 读取一批照片的指纹。每个并发 worker 完成一张后才取下一张，
+   * 取的时候重新按当前窗口挑选，因此拖动滚动条后旧窗口最多只剩几张在读。
+   */
+  async readBatch() {
+    const results = [];
+    let budget = BATCH_SIZE;
+    let aborted = false;
+    const worker = async () => {
+      while (!this.stopped && budget > 0) {
+        const index = this.takeNext();
+        if (index === void 0) return;
+        budget -= 1;
+        const photo = this.photos[index];
+        const id = this.ids[index];
+        let signature;
+        try {
+          signature = await readPhotoSignature(photo);
+        } catch {
+          this.pending.add(index);
+          aborted = true;
+          return;
+        }
+        if (this.cache) {
+          this.cache.entries.set(id, {
+            mtimeMs: photo.mtimeMs,
+            size: photo.size,
+            hash: (signature == null ? void 0 : signature.hash) ?? null,
+            color: (signature == null ? void 0 : signature.color) ?? null
+          });
+          this.cache.dirty = true;
+        }
+        results.push({ index, signature });
+      }
+    };
+    await Promise.all(Array.from({ length: READ_CONCURRENCY }, () => worker()));
+    return { results, aborted };
+  }
+  /** 当前分析范围内待分析与总张数，用于进度展示 */
+  windowCounts() {
+    if (this.photos.length === 0) return { pending: 0, total: 0 };
+    const { start, end } = this.windowBounds();
+    let pending = 0;
+    for (const index of this.pending) {
+      if (index >= start && index <= end) pending += 1;
+    }
+    return { pending, total: Math.max(0, end - start + 1) };
   }
   async maybeCheckpoint() {
     const now = Date.now();
@@ -2623,25 +2998,50 @@ class SimilarAnalysisJob {
     this.lastCheckpointAt = now;
     await saveCache(this.albumId, new Set(this.ids));
   }
-  emit(force) {
-    const now = Date.now();
-    if (!force && now - this.lastSnapshotAt < SNAPSHOT_INTERVAL_MS) return;
-    this.lastSnapshotAt = now;
-    const groups = this.cluster.getGroups().map((group) => ({
-      // 组内按相册默认顺序排列，扑克牌封面与观赏窗口顺序保持稳定
+  /** 整本相册完成后做一次组级合并；失败时退回增量聚类结果 */
+  buildFinalGroups() {
+    try {
+      const merged = mergeSimilarGroups(
+        this.cluster.getGroups(true),
+        this.signatures,
+        this.timeById
+      );
+      return this.normalizeGroups(
+        merged.filter((group) => group.photoIds.length >= 2)
+      );
+    } catch (error) {
+      console.warn("[similar] group merge failed:", this.albumId, error);
+      return this.normalizeGroups(this.cluster.getGroups());
+    }
+  }
+  /** 组内、组间都按相册默认顺序排列，保证封面与观赏窗口顺序稳定 */
+  normalizeGroups(groups) {
+    const sorted = groups.map((group) => ({
       photoIds: [...group.photoIds].sort(
         (a2, b2) => (this.orderById.get(a2) ?? 0) - (this.orderById.get(b2) ?? 0)
       )
     }));
-    groups.sort(
+    sorted.sort(
       (a2, b2) => (this.orderById.get(a2.photoIds[0]) ?? 0) - (this.orderById.get(b2.photoIds[0]) ?? 0)
     );
+    return sorted;
+  }
+  emit(force) {
+    if (!this.initialized) return;
+    const now = Date.now();
+    if (!force && now - this.lastSnapshotAt < SNAPSHOT_INTERVAL_MS) return;
+    this.lastSnapshotAt = now;
+    const groups = this.finalGroups ?? this.normalizeGroups(this.cluster.getGroups());
+    const window = this.windowCounts();
     const snapshot = {
       albumId: this.albumId,
       groups,
       processed: this.processed,
       total: this.photos.length,
-      complete: this.completed || this.pending.length === 0 && !this.stopped,
+      complete: window.pending === 0,
+      albumComplete: this.albumComplete,
+      windowPending: window.pending,
+      windowTotal: window.total,
       error: this.error
     };
     this.latest = snapshot;
@@ -2809,12 +3209,12 @@ function getAlbumStats(albumId2, listener) {
 function startSimilarAnalysis(albumId2, listener) {
   const record = records.find((item) => item.id === albumId2);
   if (!record) return Promise.resolve();
-  const token = nextSimilarToken(albumId2);
   const existing = similarJobs.get(albumId2);
   if (existing) {
     existing.addListener(listener);
     return Promise.resolve();
   }
+  const token = nextSimilarToken(albumId2);
   return getAlbumScan(record.path).then((scan) => {
     if (similarStartTokens.get(albumId2) !== token) return;
     const current = similarJobs.get(albumId2);
@@ -2838,6 +3238,10 @@ async function pauseSimilarAnalysis(albumId2) {
 function setSimilarViewport(albumId2, start, end) {
   var _a;
   (_a = similarJobs.get(albumId2)) == null ? void 0 : _a.setViewport(start, end);
+}
+function setSimilarForeground(albumId2, foreground) {
+  var _a;
+  (_a = similarJobs.get(albumId2)) == null ? void 0 : _a.setForeground(foreground);
 }
 const EXIF_FIELDS = [
   "Make",
@@ -3006,6 +3410,12 @@ function registerIpc() {
     }
     setThumbnailScope(albumPath);
   });
+  ipcMain.handle("thumb:set-viewport", (_event, photoIds) => {
+    if (!Array.isArray(photoIds) || photoIds.some((id) => typeof id !== "string")) {
+      throw new Error("无效的可见照片列表");
+    }
+    setThumbnailViewport(photoIds);
+  });
   ipcMain.handle("album:stats", (event, albumId2) => {
     if (typeof albumId2 !== "string") throw new Error("无效的相册 id");
     const sender = event.sender;
@@ -3028,6 +3438,14 @@ function registerIpc() {
     if (typeof albumId2 !== "string") throw new Error("无效的相册 id");
     return pauseSimilarAnalysis(albumId2);
   });
+  ipcMain.handle(
+    "album:similar-foreground",
+    (_event, albumId2, foreground) => {
+      if (typeof albumId2 !== "string") throw new Error("无效的相册 id");
+      if (typeof foreground !== "boolean") throw new Error("无效的前台状态");
+      setSimilarForeground(albumId2, foreground);
+    }
+  );
   ipcMain.handle(
     "album:similar-viewport",
     (_event, albumId2, start, end) => {

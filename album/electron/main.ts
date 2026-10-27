@@ -10,6 +10,7 @@ import {
   pauseSimilarAnalysis,
   removeAlbum,
   setPhotosUpdatedHandler,
+  setSimilarForeground,
   setSimilarViewport,
   startSimilarAnalysis
 } from './library'
@@ -18,7 +19,12 @@ import { readPhotoDetails } from './photoInfo'
 import { getPhotoFile } from './photos'
 import { flushScanCacheSync, loadScanCache } from './scanCache'
 import { flushSimilarCacheSync } from './similarity'
-import { installThumbProtocol, registerThumbScheme, setThumbnailScope } from './thumbnails'
+import {
+  installThumbProtocol,
+  registerThumbScheme,
+  setThumbnailScope,
+  setThumbnailViewport
+} from './thumbnails'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -93,6 +99,14 @@ function registerIpc(): void {
     setThumbnailScope(albumPath)
   })
 
+  // 拖动滚动条后，屏幕内照片的缩略图优先于沿途跳过的行
+  ipcMain.handle('thumb:set-viewport', (_event, photoIds: unknown) => {
+    if (!Array.isArray(photoIds) || photoIds.some((id) => typeof id !== 'string')) {
+      throw new Error('无效的可见照片列表')
+    }
+    setThumbnailViewport(photoIds)
+  })
+
   ipcMain.handle('album:stats', (event, albumId: unknown) => {
     if (typeof albumId !== 'string') throw new Error('无效的相册 id')
     const sender = event.sender
@@ -117,6 +131,15 @@ function registerIpc(): void {
     if (typeof albumId !== 'string') throw new Error('无效的相册 id')
     return pauseSimilarAnalysis(albumId)
   })
+
+  ipcMain.handle(
+    'album:similar-foreground',
+    (_event, albumId: unknown, foreground: unknown) => {
+      if (typeof albumId !== 'string') throw new Error('无效的相册 id')
+      if (typeof foreground !== 'boolean') throw new Error('无效的前台状态')
+      setSimilarForeground(albumId, foreground)
+    }
+  )
 
   ipcMain.handle(
     'album:similar-viewport',

@@ -71,8 +71,11 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   open: [photos: Photo[], index: number, tag?: string]
-  /** 当前渲染窗口覆盖的照片下标范围，用于主进程优先分析屏幕附近 */
-  viewport: [start: number, end: number]
+  /**
+   * 真实可视区的照片下标范围与可见照片 id：
+   * 前者用于划定相似分析窗口，后者用于让缩略图队列优先处理屏幕内照片。
+   */
+  viewport: [start: number, end: number, photoIds: string[]]
 }>()
 
 /** 可视区上下各多渲染几行，减少快速滚动时的空白 */
@@ -204,18 +207,28 @@ const contentHeight = computed(() => {
   return totalRows.value * rowStride.value - gap.value
 })
 
+/** 真实可视区的行范围（不含 overscan）；滚动已按行量化，同行内不会重复触发 */
+const visibleRows = computed<{ firstRow: number; lastRow: number } | null>(() => {
+  const stride = rowStride.value
+  if (stride <= 0 || items.value.length === 0) return null
+  const top = Math.max(0, viewportTop.value)
+  const firstRow = Math.min(totalRows.value - 1, Math.floor(top / stride))
+  const lastRow = Math.min(
+    totalRows.value - 1,
+    Math.max(firstRow, Math.ceil((top + viewportHeight.value) / stride) - 1)
+  )
+  return { firstRow, lastRow }
+})
+
 const visibleItems = computed<VisibleItem[]>(() => {
   const cols = columns.value
   const cell = cellSize.value
   const stride = rowStride.value
-  if (cell <= 0 || stride <= 0 || items.value.length === 0) return []
+  const rows = visibleRows.value
+  if (cell <= 0 || stride <= 0 || !rows) return []
 
-  const top = Math.max(0, viewportTop.value)
-  const startRow = Math.max(0, Math.floor(top / stride) - OVERSCAN_ROWS)
-  const endRow = Math.min(
-    totalRows.value,
-    Math.ceil((top + viewportHeight.value) / stride) + OVERSCAN_ROWS
-  )
+  const startRow = Math.max(0, rows.firstRow - OVERSCAN_ROWS)
+  const endRow = Math.min(totalRows.value, rows.lastRow + 1 + OVERSCAN_ROWS)
   const start = Math.min(items.value.length, startRow * cols)
   const end = Math.min(items.value.length, endRow * cols)
 
@@ -235,23 +248,47 @@ const visibleItems = computed<VisibleItem[]>(() => {
   return visible
 })
 
-let lastViewport: { start: number; end: number } | null = null
+/**
+ * 上报真实可视区（不含 overscan）：
+ * 相似组可能折叠多张照片，分析范围取可见项第一张照片的下标；
+ * 缩略图优先级只关心屏幕上真正渲染出的封面。
+ */
+const viewportReport = computed<{
+  start: number
+  end: number
+  photoIds: string[]
+} | null>(() => {
+  const rows = visibleRows.value
+  if (!rows) return null
+  const cols = columns.value
+  const firstIndex = rows.firstRow * cols
+  const lastIndex = Math.min(items.value.length, (rows.lastRow + 1) * cols)
+  if (firstIndex >= lastIndex) return null
 
-/** 只上报照片下标范围；相似组可能折叠多张照片，起点取其第一张 */
+  let start = Number.POSITIVE_INFINITY
+  let end = -1
+  const photoIds: string[] = []
+  for (let index = firstIndex; index < lastIndex; index += 1) {
+    const item = items.value[index]
+    if (!item) continue
+    if (item.albumIndex < start) start = item.albumIndex
+    if (item.albumIndex > end) end = item.albumIndex
+    for (const cover of item.covers) photoIds.push(cover.id)
+  }
+  if (!Number.isFinite(start) || end < 0) return null
+  return { start, end, photoIds }
+})
+
+let lastViewportKey = ''
+
 watch(
-  visibleItems,
-  (items) => {
-    if (items.length === 0) return
-    let start = Number.POSITIVE_INFINITY
-    let end = -1
-    for (const item of items) {
-      if (item.albumIndex < start) start = item.albumIndex
-      if (item.albumIndex > end) end = item.albumIndex
-    }
-    if (!Number.isFinite(start) || end < 0) return
-    if (lastViewport && lastViewport.start === start && lastViewport.end === end) return
-    lastViewport = { start, end }
-    emit('viewport', start, end)
+  viewportReport,
+  (report) => {
+    if (!report) return
+    const key = `${report.start}:${report.end}:${report.photoIds.join(',')}`
+    if (key === lastViewportKey) return
+    lastViewportKey = key
+    emit('viewport', report.start, report.end, report.photoIds)
   },
   { immediate: true }
 )
