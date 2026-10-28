@@ -159,6 +159,17 @@
       <span v-if="tag" class="viewer__tag">{{ tag }}</span>
       <span class="viewer__counter">{{ currentIndex + 1 }} / {{ photos.length }}</span>
       <button
+        class="viewer__flip viewer__favorite"
+        :class="{ 'is-on': isFavorite }"
+        type="button"
+        :aria-pressed="isFavorite"
+        :title="isFavorite ? '取消收藏 (S)' : '收藏 (S)'"
+        @click.stop="toggleFavorite"
+      >
+        <span aria-hidden="true">{{ isFavorite ? '♥' : '♡' }}</span>
+        {{ isFavorite ? '已收藏' : '收藏' }}
+      </button>
+      <button
         class="viewer__flip"
         type="button"
         title="放大查看 (右键 / Z)"
@@ -198,9 +209,14 @@ const props = defineProps<{
   startIndex: number
   /** 观赏范围标签，如「相似 4 张」；普通浏览为空 */
   tag?: string
+  /** 收藏照片 id；收藏只写应用数据，不改动照片文件 */
+  favorites?: ReadonlySet<string>
 }>()
 
-const emit = defineEmits<{ close: [] }>()
+const emit = defineEmits<{
+  close: []
+  'toggle-favorite': [photoId: string]
+}>()
 
 const overlay = ref<HTMLElement | null>(null)
 const backFace = ref<HTMLElement | null>(null)
@@ -220,6 +236,10 @@ const detailsCache = new Map<string, PhotoDetails | null>()
 let detailRequest = 0
 
 const currentPhoto = computed(() => props.photos[currentIndex.value])
+const isFavorite = computed(() => {
+  const photo = currentPhoto.value
+  return photo ? (props.favorites?.has(photo.id) ?? false) : false
+})
 
 function close() {
   inspectPhoto.value = null
@@ -234,6 +254,11 @@ function toggleFlip() {
 function showPhoto() {
   flipped.value = false
   overlay.value?.focus()
+}
+
+function toggleFavorite() {
+  const photo = currentPhoto.value
+  if (photo) emit('toggle-favorite', photo.id)
 }
 
 /** 右键 / 「放大」/ Z：进入独立的细看层，与翻页、翻转逻辑隔离 */
@@ -382,6 +407,14 @@ function handleKeydown(event: KeyboardEvent) {
   } else if (event.key === 'f' || event.key === 'F' || event.key === 'i' || event.key === 'I') {
     event.preventDefault()
     toggleFlip()
+  } else if (
+    (event.key === 's' || event.key === 'S') &&
+    !event.ctrlKey &&
+    !event.metaKey &&
+    !event.altKey
+  ) {
+    event.preventDefault()
+    toggleFavorite()
   } else if (event.key === 'z' || event.key === 'Z') {
     event.preventDefault()
     openInspect()

@@ -51,6 +51,56 @@ export function photoId(filePath: string): string {
   return crypto.createHash('sha1').update(normalizePath(filePath)).digest('hex').slice(0, 20)
 }
 
+/** RAW 扩展名：与同名可解码文件同时存在时，只展示可解码文件 */
+const RAW_EXTENSIONS = new Set(['.nef'])
+/** 同名组里优先展示的格式，越靠前越优先 */
+const DISPLAY_PRIORITY = ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.tif', '.tiff']
+
+function extensionOf(name: string): string {
+  return path.extname(name).toLowerCase()
+}
+
+function displayRank(name: string): number {
+  const index = DISPLAY_PRIORITY.indexOf(extensionOf(name))
+  return index === -1 ? DISPLAY_PRIORITY.length : index
+}
+
+/**
+ * RAW+JPEG 同名文件（如 DSC_1880.JPG 与 DSC_1880.NEF）只保留一张用于展示：
+ * 优先 JPG，其次其他可解码格式，RAW 不参与展示。
+ * 没有 RAW 参与的同名文件（如 JPG + PNG）保持原样，避免误伤同名的不同图片。
+ * 既用于扫描前裁剪候选（省掉被隐藏 RAW 的 stat 与后续缩略图/相似分析），
+ * 也用于兼容旧扫描缓存（缓存中可能仍保留成对的文件）。
+ */
+export function dedupeRawPairs<T extends { name: string }>(photos: T[]): T[] {
+  if (photos.length < 2) return photos
+
+  const groups = new Map<string, T[]>()
+  for (const photo of photos) {
+    const stem = path.basename(photo.name, path.extname(photo.name)).toLowerCase()
+    const group = groups.get(stem)
+    if (group) group.push(photo)
+    else groups.set(stem, [photo])
+  }
+
+  const dropped = new Set<T>()
+  for (const group of groups.values()) {
+    if (group.length < 2) continue
+    if (!group.some((photo) => RAW_EXTENSIONS.has(extensionOf(photo.name)))) continue
+
+    const display = group
+      .filter((photo) => !RAW_EXTENSIONS.has(extensionOf(photo.name)))
+      .sort((a, b) => displayRank(a.name) - displayRank(b.name))[0]
+    if (!display) continue
+
+    for (const photo of group) {
+      if (photo !== display) dropped.add(photo)
+    }
+  }
+
+  return dropped.size === 0 ? photos : photos.filter((photo) => !dropped.has(photo))
+}
+
 /** 生成缩略图协议 URL；v 参数用于文件内容变化后绕过浏览器缓存 */
 export function makeThumbUrl(
   id: string,
@@ -105,12 +155,14 @@ function toCachedPhoto(photo: PhotoFile): CachedPhoto {
 
 /** 从缓存还原扫描结果，同时把文件登记到 registry 供 thumb:// 协议解析 */
 function restoreScan(entry: CachedScan): AlbumScan {
-  const photos = entry.photos.map((cached) => registerPhoto(toPhotoFile(entry.dir, cached)))
+  const photos = dedupeRawPairs(entry.photos).map((cached) =>
+    registerPhoto(toPhotoFile(entry.dir, cached))
+  )
   return { photos, missing: entry.missing }
 }
 
-/** 真实扫描目录顶层；不读取图片内容 */
-async function scanAlbumFiles(dir: string): Promise<ScanResult> {
+/** 真实扫描目录顶层；不读取图片内容。register=false 时只返回元数据，不登记 registry */
+async function scanAlbumFiles(dir: string, register = true): Promise<ScanResult> {
   let dirStat
   try {
     dirStat = await fs.stat(dir)
@@ -129,8 +181,10 @@ async function scanAlbumFiles(dir: string): Promise<ScanResult> {
     return { photos: [], missing: true, dirMtimeMs: dirStat.mtimeMs }
   }
 
-  const candidates = entries.filter(
-    (entry) => entry.isFile() && IMAGE_EXTENSIONS.has(path.extname(entry.name).toLowerCase())
+  const candidates = dedupeRawPairs(
+    entries.filter(
+      (entry) => entry.isFile() && IMAGE_EXTENSIONS.has(path.extname(entry.name).toLowerCase())
+    )
   )
 
   const photos = await mapLimit(candidates, 16, async (entry): Promise<PhotoFile | null> => {
@@ -139,13 +193,14 @@ async function scanAlbumFiles(dir: string): Promise<ScanResult> {
       const stat = await fs.stat(filePath)
       if (!stat.isFile()) return null
       const createdAt = stat.birthtimeMs > 0 ? stat.birthtimeMs : stat.mtimeMs
-      return registerPhoto({
+      const photo: PhotoFile = {
         path: filePath,
         name: entry.name,
         createdAt,
         mtimeMs: stat.mtimeMs,
         size: stat.size
-      })
+      }
+      return register ? registerPhoto(photo) : photo
     } catch {
       return null
     }
@@ -192,10 +247,12 @@ function matchesSignature(entry: CachedScan, signature: DirSignature): boolean {
 
 function scanChanged(cached: CachedScan, scan: ScanResult): boolean {
   if (cached.missing !== scan.missing) return true
-  if (cached.photos.length !== scan.photos.length) return true
+  // 旧缓存的照片列表里可能还留着成对的 RAW，先按当前规则收缩再比较
+  const cachedPhotos = dedupeRawPairs(cached.photos)
+  if (cachedPhotos.length !== scan.photos.length) return true
 
   for (let index = 0; index < scan.photos.length; index += 1) {
-    const a = cached.photos[index]
+    const a = cachedPhotos[index]
     const b = scan.photos[index]
     if (a.name !== b.name || a.createdAt !== b.createdAt || a.mtimeMs !== b.mtimeMs || a.size !== b.size) {
       return true
@@ -233,14 +290,76 @@ function summaryOfScan(scan: AlbumScan): AlbumSummary {
 
 /** 缓存里的照片未登记到 registry，封面缩略图仍需要 id -> 路径映射 */
 function summaryOfCached(entry: CachedScan): AlbumSummary {
+  const photos = dedupeRawPairs(entry.photos)
   return {
-    photoCount: entry.photos.length,
+    photoCount: photos.length,
     missing: entry.missing,
-    coverThumbs: entry.photos.slice(0, 3).map((cached) => {
+    coverThumbs: photos.slice(0, 3).map((cached) => {
       const photo = registerPhoto(toPhotoFile(entry.dir, cached))
       return makeThumbUrl(photoId(photo.path), 480, photo.mtimeMs, 'cover')
     })
   }
+}
+
+/** 设备库采样需要的轻量相册信息：只登记封面照片，不把整本照片放进 registry */
+export interface AlbumSampleSource {
+  dir: string
+  missing: boolean
+  photoCount: number
+  coverThumbs: string[]
+  /** 全部照片的轻量元数据，未登记 registry */
+  photos: CachedPhoto[]
+}
+
+function coverThumbsFor(photos: PhotoFile[]): string[] {
+  return photos
+    .slice(0, 3)
+    .map((photo) => makeThumbUrl(photoId(photo.path), 480, photo.mtimeMs, 'cover'))
+}
+
+/**
+ * 设备库按相册前几张照片归类时使用：
+ * 返回全部照片元数据供按位置采样，但只登记前 3 张封面，避免整库进入 registry。
+ */
+export async function getAlbumSampleSource(
+  dir: string,
+  force = false
+): Promise<AlbumSampleSource> {
+  const cached = !force ? getCachedScan(dir) : undefined
+  if (cached) {
+    const signature = await readDirSignature(dir)
+    if (matchesSignature(cached, signature)) {
+      const photos = dedupeRawPairs(cached.photos)
+      const coverPhotos = photos
+        .slice(0, 3)
+        .map((photo) => registerPhoto(toPhotoFile(cached.dir, photo)))
+      return {
+        dir: cached.dir,
+        missing: cached.missing,
+        photoCount: photos.length,
+        coverThumbs: coverThumbsFor(coverPhotos),
+        photos
+      }
+    }
+  }
+
+  const scan = await scanAlbumFiles(dir, false)
+  cacheScan(dir, scan)
+  const coverPhotos = scan.photos.slice(0, 3).map((photo) => registerPhoto(photo))
+  return {
+    dir,
+    missing: scan.missing,
+    photoCount: scan.photos.length,
+    coverThumbs: coverThumbsFor(coverPhotos),
+    photos: scan.photos.map(toCachedPhoto)
+  }
+}
+
+/** 把采样选中的照片登记到 registry，供缩略图/EXIF 读取使用 */
+export function registerAlbumSample(source: AlbumSampleSource, index: number): PhotoFile | null {
+  const cached = source.photos[index]
+  if (!cached) return null
+  return registerPhoto(toPhotoFile(source.dir, cached))
 }
 
 /**

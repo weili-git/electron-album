@@ -3,6 +3,7 @@ const electron = require("electron");
 let photosUpdatedListener = null;
 let statsProgressListener = null;
 let similarSnapshotListener = null;
+let gearSnapshotListener = null;
 const api = {
   addAlbums: () => electron.ipcRenderer.invoke("album:add"),
   listAlbums: () => electron.ipcRenderer.invoke("album:list"),
@@ -30,6 +31,17 @@ const api = {
     electron.ipcRenderer.on("album:similar-snapshot", similarSnapshotListener);
   },
   getPhotoDetails: (photoId) => electron.ipcRenderer.invoke("photo:details", photoId),
+  listFavorites: () => electron.ipcRenderer.invoke("favorites:list"),
+  setFavorites: (photoIds, favorite) => electron.ipcRenderer.invoke("favorites:set", photoIds, favorite),
+  startGearScan: (refresh) => electron.ipcRenderer.invoke("gear:start", refresh),
+  pauseGearScan: () => electron.ipcRenderer.invoke("gear:pause"),
+  onGearSnapshot: (callback) => {
+    if (gearSnapshotListener) {
+      electron.ipcRenderer.removeListener("gear:snapshot", gearSnapshotListener);
+    }
+    gearSnapshotListener = (_event, payload) => callback(payload);
+    electron.ipcRenderer.on("gear:snapshot", gearSnapshotListener);
+  },
   // 只保留一个订阅，避免热更新重挂载时重复监听
   onPhotosUpdated: (callback) => {
     if (photosUpdatedListener) {

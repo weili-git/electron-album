@@ -7,14 +7,23 @@ import {
   getAlbums,
   listPhotos,
   loadLibrary,
+  pauseGearScan,
   pauseSimilarAnalysis,
   removeAlbum,
   setPhotosUpdatedHandler,
   setSimilarForeground,
   setSimilarViewport,
+  startGearScan,
   startSimilarAnalysis
 } from './library'
 import { flushExifCacheSync } from './exifStats'
+import { flushGearCacheSync, loadGearCache } from './gear'
+import {
+  flushFavoritesSync,
+  listFavorites,
+  loadFavorites,
+  setFavorites
+} from './favorites'
 import { readPhotoDetails } from './photoInfo'
 import { getPhotoFile } from './photos'
 import { flushScanCacheSync, loadScanCache } from './scanCache'
@@ -84,6 +93,19 @@ function registerIpc(): void {
     return listPhotos(albumId)
   })
 
+  ipcMain.handle('favorites:list', () => listFavorites())
+
+  ipcMain.handle(
+    'favorites:set',
+    (_event, photoIds: unknown, favorite: unknown) => {
+      if (!Array.isArray(photoIds) || photoIds.some((id) => typeof id !== 'string')) {
+        throw new Error('无效的照片列表')
+      }
+      if (typeof favorite !== 'boolean') throw new Error('无效的收藏状态')
+      return setFavorites(photoIds, favorite)
+    }
+  )
+
   ipcMain.handle('photo:details', (_event, photoId: unknown) => {
     if (typeof photoId !== 'string') throw new Error('无效的照片 id')
     const file = getPhotoFile(photoId)
@@ -151,12 +173,26 @@ function registerIpc(): void {
       setSimilarViewport(albumId, start, end)
     }
   )
+
+  ipcMain.handle('gear:start', (event, refresh: unknown) => {
+    if (refresh !== undefined && typeof refresh !== 'boolean') {
+      throw new Error('无效的刷新参数')
+    }
+    const sender = event.sender
+    return startGearScan((snapshot) => {
+      if (!sender.isDestroyed()) {
+        sender.send('gear:snapshot', snapshot)
+      }
+    }, refresh ?? false)
+  })
+
+  ipcMain.handle('gear:pause', () => pauseGearScan())
 }
 
 app.whenReady().then(async () => {
   // 移除 Electron 默认菜单（File/Edit/View/…），界面更简洁
   Menu.setApplicationMenu(null)
-  await Promise.all([loadLibrary(), loadScanCache()])
+  await Promise.all([loadLibrary(), loadScanCache(), loadFavorites(), loadGearCache()])
   installThumbProtocol()
   registerIpc()
   createWindow()
@@ -173,6 +209,8 @@ app.on('before-quit', () => {
   flushScanCacheSync()
   flushExifCacheSync()
   flushSimilarCacheSync()
+  flushFavoritesSync()
+  flushGearCacheSync()
 })
 
 app.on('activate', () => {

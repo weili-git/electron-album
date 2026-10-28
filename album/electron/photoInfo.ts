@@ -2,7 +2,7 @@ import path from 'node:path'
 import exifr from 'exifr'
 import sharp from 'sharp'
 import type { PhotoDetails } from '../shared/types'
-import { parseExifDate, toNumber } from './exif'
+import { cleanString, joinCamera, parseExifDate, toNumber } from './exif'
 import type { PhotoFile } from './photos'
 
 /** 只解析需要的字段，避免读取庞大的厂商私有信息 */
@@ -122,16 +122,4 @@ async function readSharpMetadata(
   }
 }
 
-function joinCamera(make: string | null, model: string | null): string | null {
-  if (!make) return model
-  if (!model) return make
-  const brand = make.split(/\s+/)[0]?.toLowerCase()
-  return brand && model.toLowerCase().includes(brand) ? model : `${make} ${model}`
-}
-
-function cleanString(value: unknown): string | null {
-  if (typeof value !== 'string') return null
-  const trimmed = value.replace(/\0+$/, '').trim()
-  return trimmed || null
-}
 

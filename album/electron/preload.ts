@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
 import type {
   AlbumApi,
   AlbumStatsProgress,
+  GearSnapshot,
   PhotosUpdatedEvent,
   SimilarSnapshot
 } from '../shared/types'
@@ -12,6 +13,9 @@ let statsProgressListener:
   | null = null
 let similarSnapshotListener:
   | ((event: IpcRendererEvent, payload: SimilarSnapshot) => void)
+  | null = null
+let gearSnapshotListener:
+  | ((event: IpcRendererEvent, payload: GearSnapshot) => void)
   | null = null
 
 const api: AlbumApi = {
@@ -43,6 +47,18 @@ const api: AlbumApi = {
     ipcRenderer.on('album:similar-snapshot', similarSnapshotListener)
   },
   getPhotoDetails: (photoId) => ipcRenderer.invoke('photo:details', photoId),
+  listFavorites: () => ipcRenderer.invoke('favorites:list'),
+  setFavorites: (photoIds, favorite) =>
+    ipcRenderer.invoke('favorites:set', photoIds, favorite),
+  startGearScan: (refresh) => ipcRenderer.invoke('gear:start', refresh),
+  pauseGearScan: () => ipcRenderer.invoke('gear:pause'),
+  onGearSnapshot: (callback) => {
+    if (gearSnapshotListener) {
+      ipcRenderer.removeListener('gear:snapshot', gearSnapshotListener)
+    }
+    gearSnapshotListener = (_event, payload: GearSnapshot) => callback(payload)
+    ipcRenderer.on('gear:snapshot', gearSnapshotListener)
+  },
   // 只保留一个订阅，避免热更新重挂载时重复监听
   onPhotosUpdated: (callback) => {
     if (photosUpdatedListener) {

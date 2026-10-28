@@ -3,6 +3,7 @@ import fs from 'node:fs/promises'
 import fsSync from 'node:fs'
 import path from 'node:path'
 import type { SimilarGroup, SimilarSnapshot } from '../shared/types'
+import { readGearExif } from './exif'
 import {
   computeSignature,
   IncrementalSimilarCluster,
@@ -31,6 +32,8 @@ const VIEWPORT_SETTLE_MS = 250
 const SNAPSHOT_INTERVAL_MS = 1000
 /** 定期落盘，取消或异常退出时最多丢几秒的指纹 */
 const CHECKPOINT_INTERVAL_MS = 5000
+/** 窗口分析完成后的空闲期补读设备信息；逐张串行并留出间隔，尽量不抢 I/O */
+const GEAR_READ_INTERVAL_MS = 25
 
 interface CachedSignatureEntry {
   /** 与原文件对比，文件变化后自动失效 */
@@ -40,6 +43,10 @@ interface CachedSignatureEntry {
   hash: string | null
   /** 48 个 0–255 的 RGB 均值；hash 为 null 时它也必须是 null */
   color: number[] | null
+  /** 相似分析空闲时顺带读取的机身；undefined 表示尚未读取 */
+  camera?: string | null
+  /** 相似分析空闲时顺带读取的镜头；undefined 表示尚未读取 */
+  lens?: string | null
 }
 
 interface CacheFile {
@@ -95,8 +102,65 @@ function isCachedEntry(value: unknown): value is CachedSignatureEntry {
     Number.isFinite(entry.size) &&
     isHash(entry.hash) &&
     isColor(entry.color) &&
-    (entry.hash === null) === (entry.color === null)
+    (entry.hash === null) === (entry.color === null) &&
+    (entry.camera === undefined || entry.camera === null || typeof entry.camera === 'string') &&
+    (entry.lens === undefined || entry.lens === null || typeof entry.lens === 'string')
   )
+}
+
+export interface CachedGearInfo {
+  id: string
+  mtimeMs: number
+  size: number
+  camera: string | null
+  lens: string | null
+}
+
+function projectGearInfo(
+  entries: Iterable<[string, CachedSignatureEntry]>
+): CachedGearInfo[] {
+  const result: CachedGearInfo[] = []
+  for (const [id, entry] of entries) {
+    if (entry.camera === undefined && entry.lens === undefined) continue
+    result.push({
+      id,
+      mtimeMs: entry.mtimeMs,
+      size: entry.size,
+      camera: entry.camera ?? null,
+      lens: entry.lens ?? null
+    })
+  }
+  return result
+}
+
+/**
+ * 供设备库读取相似分析顺带得到的机身/镜头；不会触发分析，也不会写入缓存。
+ * 内存里已有该相册缓存时直接复用（可能包含尚未落盘的新结果），
+ * 否则只读文件、不把整本指纹常驻内存。旧缓存没有这些字段时自然为空。
+ */
+export async function getCachedGearInfo(albumId: string): Promise<CachedGearInfo[]> {
+  const existing = caches.get(albumId)
+  if (existing) return projectGearInfo(existing.entries)
+
+  try {
+    const raw = await fs.readFile(cacheFile(albumId), 'utf8')
+    const parsed = JSON.parse(raw) as Partial<CacheFile>
+    if (parsed.version !== CACHE_VERSION || !parsed.entries || typeof parsed.entries !== 'object') {
+      return []
+    }
+
+    const entries: [string, CachedSignatureEntry][] = []
+    for (const [id, entry] of Object.entries(parsed.entries)) {
+      if (isCachedEntry(entry)) entries.push([id, entry])
+    }
+    return projectGearInfo(entries)
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code !== 'ENOENT') {
+      console.warn('[similar] failed to read gear info:', albumId, error)
+    }
+    return []
+  }
 }
 
 async function loadCache(albumId: string): Promise<AlbumCache> {
@@ -218,9 +282,13 @@ export class SimilarAnalysisJob {
   private cache: AlbumCache | null = null
   /** 整本相册中还没有指纹的索引；只在当前窗口内选取 */
   private readonly pending = new Set<number>()
+  /** 当前窗口内已有指纹、但尚未读取机身/镜头的索引；窗口空闲时补读 */
+  private readonly gearTargets = new Set<number>()
   private processed = 0
   private viewportStart = 0
   private viewportEnd = 31
+  /** 每次真实视口变化递增；设备补读遇到滚动要立刻停下，把 I/O 让回给新窗口分析 */
+  private viewportEpoch = 0
   /** 最近一次视口变化时间；滚动期间让分析等待，先满足缩略图读盘 */
   private lastViewportSignalAt = 0
   private foreground = false
@@ -239,6 +307,8 @@ export class SimilarAnalysisJob {
   private lastCheckpointAt = 0
   private running: Promise<void> | null = null
   private wake: (() => void) | null = null
+  /** 批次/空闲补读期间收到视口或恢复信号时先记下，避免下一次 waitForWake 睡死 */
+  private wakePending = false
 
   constructor(albumId: string, photos: PhotoFile[]) {
     this.albumId = albumId
@@ -265,6 +335,7 @@ export class SimilarAnalysisJob {
     this.viewportStart = lower
     this.viewportEnd = upper
     if (!changed) return
+    this.viewportEpoch += 1
     this.lastViewportSignalAt = Date.now()
     // 新窗口可能已经全部命中缓存，重推一次快照以更新“分析中 x/y”
     this.idleEmitted = false
@@ -296,10 +367,13 @@ export class SimilarAnalysisJob {
     if (this.cache) await saveCache(this.albumId, new Set(this.ids))
   }
 
-  /** 唤醒正在等待窗口/前台状态的 run 循环 */
+  /** 唤醒正在等待窗口/前台状态的 run 循环；循环正忙时记下信号 */
   private wakeUp(): void {
     const resolve = this.wake
-    if (!resolve) return
+    if (!resolve) {
+      this.wakePending = true
+      return
+    }
     this.wake = null
     resolve()
   }
@@ -307,6 +381,11 @@ export class SimilarAnalysisJob {
   private waitForWake(): Promise<void> {
     // pause() 可能在批次执行期间发出停止信号；不要丢掉它，否则会永远等下去
     if (this.stopped) return Promise.resolve()
+    // 滚动/关闭观赏窗口时循环可能正在补读设备信息，信号要留到下一次等待
+    if (this.wakePending) {
+      this.wakePending = false
+      return Promise.resolve()
+    }
     return new Promise((resolve) => {
       this.wake = resolve
     })
@@ -363,6 +442,12 @@ export class SimilarAnalysisJob {
           if (!aborted && !this.idleEmitted) {
             this.idleEmitted = true
             this.emit(true)
+          }
+          // 指纹已齐的空闲时间用来补读机身/镜头；只读当前窗口，不扫整本
+          this.collectGearTargets()
+          if (await this.drainGearTargets()) {
+            await this.maybeCheckpoint()
+            continue
           }
           await this.waitForWake()
           continue
@@ -485,11 +570,16 @@ export class SimilarAnalysisJob {
           return
         }
         if (this.cache) {
+          const previous = this.cache.entries.get(id)
+          // 同一文件的机身/镜头已经读过就保留；文件变化后重新读取
+          const sameFile =
+            previous && previous.mtimeMs === photo.mtimeMs && previous.size === photo.size
           this.cache.entries.set(id, {
             mtimeMs: photo.mtimeMs,
             size: photo.size,
             hash: signature?.hash ?? null,
-            color: signature?.color ?? null
+            color: signature?.color ?? null,
+            ...(sameFile ? { camera: previous?.camera, lens: previous?.lens } : {})
           })
           this.cache.dirty = true
         }
@@ -499,6 +589,88 @@ export class SimilarAnalysisJob {
 
     await Promise.all(Array.from({ length: READ_CONCURRENCY }, () => worker()))
     return { results, aborted }
+  }
+
+  /** 收集当前窗口内已有指纹、但还没读过机身/镜头的照片 */
+  private collectGearTargets(): void {
+    if (!this.cache) return
+    const { start, end } = this.windowBounds()
+
+    for (const index of this.gearTargets) {
+      if (index < start || index > end) this.gearTargets.delete(index)
+    }
+
+    for (let index = start; index <= end; index += 1) {
+      const entry = this.cache.entries.get(this.ids[index])
+      if (!entry || entry.lens !== undefined) continue
+      const photo = this.photos[index]
+      if (entry.mtimeMs !== photo.mtimeMs || entry.size !== photo.size) continue
+      this.gearTargets.add(index)
+    }
+  }
+
+  /**
+   * 逐张补读窗口内照片的机身/镜头。只在指纹已齐的空闲期调用：
+   * 串行读取并留出间隔，读到一张就更新缓存，不参与分析进度。
+   */
+  private async drainGearTargets(): Promise<boolean> {
+    if (!this.cache) {
+      this.gearTargets.clear()
+      return false
+    }
+
+    let readAny = false
+    // 补读期间用户滚动：立即收手，先处理新窗口的指纹，剩下的下次空闲再读
+    const epoch = this.viewportEpoch
+    while (
+      !this.stopped &&
+      !this.foreground &&
+      this.viewportEpoch === epoch &&
+      this.gearTargets.size > 0
+    ) {
+      const { start, end } = this.windowBounds()
+      let target: number | undefined
+      for (const index of this.gearTargets) {
+        if (index >= start && index <= end) {
+          target = index
+          break
+        }
+      }
+      if (target === undefined) {
+        this.gearTargets.clear()
+        break
+      }
+      this.gearTargets.delete(target)
+
+      const photo = this.photos[target]
+      const id = this.ids[target]
+      const entry = this.cache.entries.get(id)
+      if (!entry || entry.mtimeMs !== photo.mtimeMs || entry.size !== photo.size) continue
+      if (entry.lens !== undefined) continue
+
+      let camera: string | null = null
+      let lens: string | null = null
+      try {
+        const info = await readGearExif(photo.path)
+        camera = info.camera
+        lens = info.lens
+      } catch (error) {
+        // 读不到也记下来，避免每次空闲都重试；文件变化后 mtime/size 会失效重读
+        console.warn('[similar] failed to read gear EXIF:', photo.path, error)
+      }
+
+      const current = this.cache.entries.get(id)
+      if (current && current.mtimeMs === photo.mtimeMs && current.size === photo.size) {
+        current.camera = camera
+        current.lens = lens
+        this.cache.dirty = true
+        readAny = true
+      }
+
+      if (!this.stopped) await sleep(GEAR_READ_INTERVAL_MS)
+    }
+
+    return readAny
   }
 
   /** 当前分析范围内待分析与总张数，用于进度展示 */

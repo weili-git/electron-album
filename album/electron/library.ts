@@ -5,6 +5,12 @@ import crypto from 'node:crypto'
 import type { AddAlbumsResult, Album, AlbumStats, Photo } from '../shared/types'
 import { computeAlbumStats, removeAlbumExifCache } from './exifStats'
 import {
+  GearScanJob,
+  pruneGearCache,
+  removeGearCache,
+  type GearSnapshotListener
+} from './gear'
+import {
   removeAlbumSimilarCache,
   SimilarAnalysisJob,
   type SimilarSnapshotListener
@@ -56,6 +62,11 @@ const statsJobs = new Map<string, StatsJob>()
 const similarJobs = new Map<string, SimilarAnalysisJob>()
 /** 防止 start 扫描期间用户已经暂停，扫描结束后又启动旧任务 */
 const similarStartTokens = new Map<string, number>()
+
+/** 设备库扫描一次只跑一个任务，离开设备库页面时暂停 */
+let gearJob: GearScanJob | null = null
+/** 防止暂停后旧的扫描任务又被新的 start 复用 */
+let gearStartToken = 0
 
 function nextSimilarToken(albumId: string): number {
   const token = (similarStartTokens.get(albumId) ?? 0) + 1
@@ -182,6 +193,7 @@ export async function removeAlbum(id: string): Promise<Album[]> {
     removeCachedScan(removed.path)
     removeAlbumExifCache(id)
     removeAlbumSimilarCache(id)
+    removeGearCache(id)
     await persist()
   }
   return getAlbums()
@@ -294,4 +306,49 @@ export function setSimilarViewport(albumId: string, start: number, end: number):
 /** 观赏窗口/细看层打开时让分析让路，关闭后自动继续 */
 export function setSimilarForeground(albumId: string, foreground: boolean): void {
   similarJobs.get(albumId)?.setForeground(foreground)
+}
+
+/**
+ * 开始设备库扫描：先校验缓存并立即推送，再逐本补齐待读相册。
+ * refresh 会忽略已有样本重新读取；正在扫描时先暂停旧任务。
+ */
+export async function startGearScan(
+  listener: GearSnapshotListener,
+  refresh = false
+): Promise<void> {
+  if (gearJob) {
+    if (!refresh) {
+      gearJob.addListener(listener)
+      return
+    }
+    gearJob.addListener(listener)
+    await pauseGearScan()
+    // 暂停期间可能已经有新的 start 创建了任务，直接复用
+    if (gearJob) {
+      gearJob.addListener(listener)
+      return
+    }
+  }
+
+  pruneGearCache(new Set(records.map((record) => record.id)))
+
+  const token = (gearStartToken += 1)
+  const job = new GearScanJob(
+    records.map(({ id, path: albumPath, name }) => ({ id, path: albumPath, name })),
+    listener,
+    refresh
+  )
+  gearJob = job
+  void job.start().finally(() => {
+    if (gearJob === job && gearStartToken === token) gearJob = null
+  })
+}
+
+/** 离开设备库页面时暂停；当前相册读完后停止并保存样本 */
+export async function pauseGearScan(): Promise<void> {
+  gearStartToken += 1
+  const job = gearJob
+  if (!job) return
+  gearJob = null
+  await job.pause()
 }

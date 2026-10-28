@@ -1,6 +1,6 @@
 <template>
-  <div class="app">
-    <header class="app-header">
+  <div class="app" :class="{ 'app--album': currentAlbum || gearDeviceKey }">
+    <header v-if="!currentAlbum && !gearDeviceKey" class="app-header">
       <div class="brand">
         <span class="brand__mark" aria-hidden="true" />
         <div>
@@ -8,15 +8,40 @@
           <p class="brand__subtitle">{{ subtitle }}</p>
         </div>
       </div>
-      <button class="btn btn--primary" :disabled="busy" @click="handleAdd">
-        {{ busy ? '正在扫描…' : '＋ 添加相册目录' }}
-      </button>
+      <div class="app-header__actions">
+        <div class="view-switch" role="group" aria-label="首页视图">
+          <button
+            class="view-switch__item"
+            :class="{ 'is-active': homeView === 'albums' }"
+            type="button"
+            :aria-pressed="homeView === 'albums'"
+            title="按加入顺序查看相册"
+            @click="switchHomeView('albums')"
+          >
+            按相册
+          </button>
+          <button
+            class="view-switch__item"
+            :class="{ 'is-active': homeView === 'devices' }"
+            type="button"
+            :aria-pressed="homeView === 'devices'"
+            :disabled="albums.length === 0"
+            :title="albums.length === 0 ? '先添加相册目录' : '按拍摄设备查看相册'"
+            @click="switchHomeView('devices')"
+          >
+            按设备
+          </button>
+        </div>
+        <button class="btn btn--primary" :disabled="busy" @click="handleAdd">
+          {{ busy ? '正在扫描…' : '＋ 添加相册目录' }}
+        </button>
+      </div>
     </header>
 
     <main class="app-main">
       <template v-if="currentAlbum">
         <div class="album-bar">
-          <button class="btn btn--ghost" @click="backToLibrary">← 返回</button>
+          <button class="btn btn--ghost" @click="backFromAlbum">← 返回</button>
           <div class="album-bar__title">
             <h2>{{ currentAlbum.name }}</h2>
             <span class="album-bar__path" :title="currentAlbum.path">{{ currentAlbum.path }}</span>
@@ -27,6 +52,7 @@
             type="button"
             :aria-pressed="similarEnabled"
             :aria-busy="similarLoading"
+            :disabled="favoritesOnly"
             :title="similarTitle"
             @click="toggleSimilarity"
           >
@@ -40,6 +66,28 @@
               <span class="similar-toggle__knob" />
             </span>
           </button>
+          <button
+            class="btn btn--ghost favorites-filter"
+            :class="{ 'is-active': favoritesOnly }"
+            type="button"
+            :aria-pressed="favoritesOnly"
+            :disabled="favoriteCount === 0 && !favoritesOnly"
+            :title="favoritesOnly ? '显示全部照片' : '只看收藏的照片'"
+            @click="toggleFavoritesOnly"
+          >
+            收藏 {{ favoriteCount }}
+          </button>
+          <button
+            class="btn btn--ghost selection-toggle"
+            :class="{ 'is-active': selectionMode }"
+            type="button"
+            :aria-pressed="selectionMode"
+            :disabled="photos.length === 0"
+            :title="selectionMode ? '退出批量选择' : '批量选择照片'"
+            @click="selectionMode = !selectionMode"
+          >
+            {{ selectionMode ? '完成' : '选择' }}
+          </button>
           <button class="btn btn--ghost" type="button" @click="showStats = true">统计</button>
           <span class="pill">{{ detailCount }} 张</span>
         </div>
@@ -49,8 +97,32 @@
           :loading="photosLoading"
           :groups="similarGroups"
           :grouping="similarEnabled"
+          :favorites="favoriteIds"
+          :favorites-only="favoritesOnly"
+          v-model:selection-mode="selectionMode"
           @open="openViewer"
           @viewport="handleViewport"
+          @toggle-favorite="handleFavoriteToggle"
+        />
+      </template>
+
+      <template v-else-if="gearDeviceKey">
+        <GearDeviceView
+          :device="gearDevice"
+          :snapshot="gearSnapshot"
+          :albums="albums"
+          @back="backToGearHome"
+          @open-album="openAlbumFromGear"
+        />
+      </template>
+
+      <template v-else-if="homeView === 'devices'">
+        <GearLibraryView
+          :snapshot="gearSnapshot"
+          :albums="albums"
+          :error="gearError"
+          @open-device="openGearDevice"
+          @open-album="openAlbumFromGear"
         />
       </template>
 
@@ -81,7 +153,9 @@
         :photos="viewerPhotos"
         :start-index="viewerIndex"
         :tag="viewerTag"
+        :favorites="favoriteIds"
         @close="closeViewer"
+        @toggle-favorite="handleViewerFavorite"
       />
     </transition>
 
@@ -100,9 +174,10 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import type {
   Album,
+  GearDevice,
   Photo,
   PhotosUpdatedEvent,
   SimilarGroup,
@@ -110,8 +185,11 @@ import type {
 } from '../shared/types'
 import AlbumCard from './components/AlbumCard.vue'
 import AlbumStatsPanel from './components/AlbumStatsPanel.vue'
+import GearDeviceView from './components/GearDevice.vue'
+import GearLibraryView from './components/GearLibrary.vue'
 import PhotoGrid from './components/PhotoGrid.vue'
 import PhotoViewer from './components/PhotoViewer.vue'
+import { useGear } from './composables/useGear'
 
 const albums = ref<Album[]>([])
 const loading = ref(true)
@@ -124,6 +202,68 @@ const viewerIndex = ref<number | null>(null)
 const viewerTag = ref('')
 const showStats = ref(false)
 const message = ref('')
+const favoriteIds = ref<Set<string>>(new Set())
+const favoritesOnly = ref(false)
+const selectionMode = ref(false)
+/** 进入「只看收藏」前的滚动位置；关闭筛选后恢复到原处 */
+let browseScrollY: number | null = null
+
+/**
+ * 首页两种视图：按相册加入顺序 / 按拍摄设备分类。
+ * 设备详情是首页下的二级页面，打开相册时保留设备 key，返回后回到原处。
+ */
+type HomeView = 'albums' | 'devices'
+const HOME_VIEW_KEY = 'album.home.view'
+function readHomeView(): HomeView {
+  try {
+    return window.localStorage.getItem(HOME_VIEW_KEY) === 'devices' ? 'devices' : 'albums'
+  } catch {
+    return 'albums'
+  }
+}
+function saveHomeView(view: HomeView): void {
+  try {
+    window.localStorage.setItem(HOME_VIEW_KEY, view)
+  } catch {
+    // 忽略存储不可用，切换仍对当前会话生效
+  }
+}
+const homeView = ref<HomeView>(readHomeView())
+const gearDeviceKey = ref<string | null>(null)
+type AlbumSource = 'library' | 'gearLibrary' | 'gearDevice'
+const albumSource = ref<AlbumSource>('library')
+const {
+  snapshot: gearSnapshot,
+  error: gearError,
+  start: startGear,
+  pause: pauseGear,
+  subscribe: subscribeGear
+} = useGear()
+
+const gearDevice = computed<GearDevice | null>(() => {
+  if (!gearDeviceKey.value || !gearSnapshot.value) return null
+  return (
+    gearSnapshot.value.cameras.find((device) => device.key === gearDeviceKey.value) ?? null
+  )
+})
+
+let albumsHomeScrollY = 0
+let devicesHomeScrollY = 0
+let deviceDetailScrollY = 0
+let gearWasScanning = false
+
+/** 扫描可能刷新了目录签名，完成后同步相册张数与封面 */
+watch(gearSnapshot, (snapshot) => {
+  if (!snapshot) return
+  if (snapshot.scanning) {
+    gearWasScanning = true
+    return
+  }
+  if (!gearWasScanning) return
+  gearWasScanning = false
+  // 设备扫描可能刷新了目录签名，首页的设备视图需要同步张数与封面
+  if (homeView.value === 'devices' && !currentAlbum.value) void loadAlbums()
+})
 
 const SIMILAR_PREFERENCE_KEY = 'album.similar.enabled'
 /** 开关默认开启；关闭后记住选择，避免每次进入相册又重新分析 */
@@ -174,6 +314,12 @@ let pendingPhotos: Photo[] | null = null
 const subtitle = computed(() => {
   if (currentAlbum.value) return currentAlbum.value.path
   if (loading.value) return '正在加载'
+  if (homeView.value === 'devices') {
+    const devices = gearSnapshot.value?.cameras.length
+    return devices === undefined
+      ? `${albums.value.length} 个相册`
+      : `${albums.value.length} 个相册 · ${devices} 台设备`
+  }
   return `${albums.value.length} 个相册`
 })
 
@@ -186,7 +332,16 @@ const similarPhotoCount = computed(() =>
   similarGroups.value.reduce((sum, group) => sum + group.photoIds.length, 0)
 )
 
+const favoriteCount = computed(() => {
+  if (favoriteIds.value.size === 0) return 0
+  return photos.value.reduce(
+    (count, photo) => count + (favoriteIds.value.has(photo.id) ? 1 : 0),
+    0
+  )
+})
+
 const similarLabel = computed(() => {
+  if (favoritesOnly.value) return '相似合并 · 已暂停'
   if (!similarEnabled.value) return '相似合并'
   if (similarLoading.value) {
     const progress = similarProgress.value
@@ -200,6 +355,7 @@ const similarLabel = computed(() => {
 })
 
 const similarTitle = computed(() => {
+  if (favoritesOnly.value) return '只看收藏时暂停相似分析，关闭筛选后自动继续'
   if (!similarEnabled.value) return '开启后自动分析并合并相似照片'
   const progress = similarProgress.value
   const analyzed = progress ? `已分析 ${progress.processed}/${progress.total} 张。` : ''
@@ -218,6 +374,95 @@ function showMessage(text: string) {
   messageTimer = window.setTimeout(() => {
     message.value = ''
   }, 2600)
+}
+
+async function loadFavorites() {
+  try {
+    favoriteIds.value = new Set(await window.api.listFavorites())
+  } catch (error) {
+    console.error(error)
+  }
+}
+
+/** 收藏只写应用数据；先本地生效，失败时按主进程状态回滚 */
+async function setFavorite(photoIds: string[], favorite: boolean, notify: boolean) {
+  if (photoIds.length === 0) return
+  const previous = favoriteIds.value
+  const next = new Set(previous)
+  for (const id of photoIds) {
+    if (favorite) next.add(id)
+    else next.delete(id)
+  }
+  favoriteIds.value = next
+
+  try {
+    await window.api.setFavorites(photoIds, favorite)
+    if (notify) {
+      showMessage(favorite ? `已收藏 ${photoIds.length} 张` : `已取消收藏 ${photoIds.length} 张`)
+    }
+  } catch (error) {
+    console.error(error)
+    try {
+      favoriteIds.value = new Set(await window.api.listFavorites())
+    } catch {
+      favoriteIds.value = previous
+    }
+    showMessage('收藏操作失败')
+  }
+}
+
+/** 网格中的单张、相似组整组与批量收藏；调用方给出目标状态 */
+function handleFavoriteToggle(photoIds: string[], favorite: boolean) {
+  void setFavorite(photoIds, favorite, photoIds.length > 1)
+}
+
+function handleViewerFavorite(photoId: string) {
+  void setFavorite([photoId], !favoriteIds.value.has(photoId), false)
+}
+
+/**
+ * 「只看收藏」筛选：
+ * 筛选后的网格下标与完整相册不再对应，先暂停相似分析，关闭筛选后再从缓存继续。
+ */
+function toggleFavoritesOnly() {
+  const next = !favoritesOnly.value
+  if (next) browseScrollY = window.scrollY
+
+  favoritesOnly.value = next
+  selectionMode.value = false
+
+  if (!next) restoreBrowsePosition()
+
+  const album = currentAlbum.value
+  if (!album) return
+
+  if (next) {
+    similarRequest += 1
+    similarLoading.value = false
+    cancelPendingGroups()
+    void window.api.pauseSimilarAnalysis(album.id).catch(() => undefined)
+    return
+  }
+
+  if (similarEnabled.value && !similarAlbumComplete.value) {
+    void startSimilarAnalysis(album)
+  }
+}
+
+/**
+ * 关闭筛选后恢复进入前的滚动位置：
+ * 网格高度要等 Vue 更新 DOM 后才恢复，先等 nextTick，再在下一帧校正一次，
+ * 避免浏览器仍按筛选后的旧高度把位置钳制住。
+ */
+function restoreBrowsePosition() {
+  const target = browseScrollY
+  browseScrollY = null
+  if (target === null) return
+
+  void nextTick(() => {
+    window.scrollTo(0, target)
+    requestAnimationFrame(() => window.scrollTo(0, target))
+  })
 }
 
 function sanitizeGroups(groups: SimilarGroup[]): SimilarGroup[] {
@@ -304,7 +549,7 @@ function resetSimilarity() {
 /** 开关关闭时停止分析并恢复全部照片；开启时从已有快照和指纹缓存继续 */
 function toggleSimilarity() {
   const album = currentAlbum.value
-  if (!album) return
+  if (!album || favoritesOnly.value) return
 
   if (similarEnabled.value) {
     similarEnabled.value = false
@@ -324,7 +569,7 @@ function toggleSimilarity() {
 }
 
 async function startSimilarAnalysis(album: Album) {
-  if (!similarEnabled.value || currentAlbum.value?.id !== album.id) return
+  if (!similarEnabled.value || favoritesOnly.value || currentAlbum.value?.id !== album.id) return
   // 等照片列表就绪后由 openAlbum 启动，避免拿空列表分析
   if (photosLoading.value) return
   const request = ++similarRequest
@@ -356,7 +601,7 @@ async function startSimilarAnalysis(album: Album) {
 
 function handleSimilarSnapshot(snapshot: SimilarSnapshot) {
   if (!currentAlbum.value || currentAlbum.value.id !== snapshot.albumId) return
-  if (!similarEnabled.value) return
+  if (!similarEnabled.value || favoritesOnly.value) return
 
   similarProgress.value = {
     processed: snapshot.processed,
@@ -377,7 +622,8 @@ function handleSimilarSnapshot(snapshot: SimilarSnapshot) {
  * - 相似分析窗口经 120ms 节流后切换，避免拖动时频繁重划
  */
 function handleViewport(start: number, end: number, photoIds: string[]) {
-  lastViewport = { start, end }
+  // 只看收藏时下标相对筛选后的列表，不能作为相似分析窗口
+  if (!favoritesOnly.value) lastViewport = { start, end }
   lastViewportAt = Date.now()
   if (!currentAlbum.value) return
 
@@ -390,7 +636,7 @@ function handleViewport(start: number, end: number, photoIds: string[]) {
     const album = currentAlbum.value
     const viewport = pendingViewport
     pendingViewport = null
-    if (!album || !viewport || !similarEnabled.value) return
+    if (!album || !viewport || !similarEnabled.value || favoritesOnly.value) return
     void window.api.setSimilarViewport(album.id, viewport.start, viewport.end).catch(() => undefined)
   }, 120)
 }
@@ -398,23 +644,38 @@ function handleViewport(start: number, end: number, photoIds: string[]) {
 /** 后台重扫增删后，用原有缓存快速重建，并继续分析新增照片 */
 function scheduleSimilarRestart() {
   const album = currentAlbum.value
-  if (!album || !similarEnabled.value) return
+  if (!album || !similarEnabled.value || favoritesOnly.value) return
 
   similarAlbumComplete.value = false
   window.clearTimeout(similarRestartTimer)
   similarRestartTimer = window.setTimeout(async () => {
     similarRestartTimer = undefined
-    if (!currentAlbum.value || currentAlbum.value.id !== album.id || !similarEnabled.value) return
+    if (
+      !currentAlbum.value ||
+      currentAlbum.value.id !== album.id ||
+      !similarEnabled.value ||
+      favoritesOnly.value
+    ) {
+      return
+    }
 
     similarLoading.value = true
     await window.api.pauseSimilarAnalysis(album.id).catch(() => undefined)
-    if (!currentAlbum.value || currentAlbum.value.id !== album.id || !similarEnabled.value) return
+    if (
+      !currentAlbum.value ||
+      currentAlbum.value.id !== album.id ||
+      !similarEnabled.value ||
+      favoritesOnly.value
+    ) {
+      return
+    }
     await startSimilarAnalysis(album)
   }, 300)
 }
 
 async function loadAlbums() {
-  loading.value = true
+  // 已有数据时静默刷新，切换视图不会把网格短暂换成加载态
+  if (albums.value.length === 0) loading.value = true
   try {
     albums.value = await window.api.listAlbums()
   } catch (error) {
@@ -440,6 +701,8 @@ async function handleAdd() {
     } else {
       showMessage(`已添加 ${result.added} 个相册`)
     }
+    // 设备视图下新增相册后立即补扫
+    if (homeView.value === 'devices' && result.added > 0) void startGear()
   } catch (error) {
     console.error(error)
     showMessage('添加相册失败')
@@ -448,7 +711,15 @@ async function handleAdd() {
   }
 }
 
-async function openAlbum(album: Album) {
+async function openAlbum(album: Album, source: AlbumSource = 'library') {
+  albumSource.value = source
+  if (source === 'library') {
+    albumsHomeScrollY = window.scrollY
+  } else {
+    void pauseGear()
+    window.scrollTo(0, 0)
+  }
+
   currentAlbum.value = album
   photos.value = []
   viewerPhotos.value = []
@@ -456,6 +727,9 @@ async function openAlbum(album: Album) {
   viewerTag.value = ''
   showStats.value = false
   pendingPhotos = null
+  favoritesOnly.value = false
+  selectionMode.value = false
+  browseScrollY = null
   resetSimilarity()
   photosLoading.value = true
   try {
@@ -486,7 +760,8 @@ function openViewer(nextPhotos: Photo[], index: number, tag?: string) {
   }
 }
 
-function backToLibrary() {
+/** 关闭当前相册的浏览状态，根据来源决定返回相册库首页还是设备库 */
+function closeAlbum() {
   const album = currentAlbum.value
   if (album) void window.api.pauseSimilarAnalysis(album.id).catch(() => undefined)
 
@@ -497,10 +772,92 @@ function backToLibrary() {
   viewerTag.value = ''
   showStats.value = false
   pendingPhotos = null
+  favoritesOnly.value = false
+  selectionMode.value = false
+  browseScrollY = null
   resetSimilarity()
+}
+
+/** 首页视图切换：只在设备视图启动扫描，切回相册视图时停止 */
+function switchHomeView(view: HomeView) {
+  if (homeView.value === view) return
+
+  if (view === 'devices') {
+    albumsHomeScrollY = window.scrollY
+    homeView.value = 'devices'
+    gearDeviceKey.value = null
+    saveHomeView(view)
+    void window.api.setThumbnailScope(null).catch(() => undefined)
+    void startGear()
+    void restoreScroll(devicesHomeScrollY)
+    return
+  }
+
+  devicesHomeScrollY = window.scrollY
+  homeView.value = 'albums'
+  gearDeviceKey.value = null
+  saveHomeView(view)
+  void pauseGear()
+  void window.api.setThumbnailScope(null).catch(() => undefined)
+  void loadAlbums()
+  void restoreScroll(albumsHomeScrollY)
+}
+
+function backToAlbumsHome() {
+  closeAlbum()
+  gearDeviceKey.value = null
+  albumSource.value = 'library'
   // 回到首页只需要封面缩略图，取消相册网格中排队中的任务
   void window.api.setThumbnailScope(null).catch(() => undefined)
   void loadAlbums()
+  void restoreScroll(albumsHomeScrollY)
+}
+
+function backFromAlbum() {
+  if (albumSource.value === 'library') {
+    backToAlbumsHome()
+    return
+  }
+
+  closeAlbum()
+  albumSource.value = 'library'
+  // 设备视图只需要封面缩略图，取消相册网格中排队中的任务
+  void window.api.setThumbnailScope(null).catch(() => undefined)
+  void startGear()
+  void restoreScroll(gearDeviceKey.value ? deviceDetailScrollY : devicesHomeScrollY)
+}
+
+async function openAlbumFromGear(album: Album) {
+  if (gearDeviceKey.value) {
+    deviceDetailScrollY = window.scrollY
+  } else {
+    devicesHomeScrollY = window.scrollY
+  }
+  await openAlbum(album, gearDeviceKey.value ? 'gearDevice' : 'gearLibrary')
+}
+
+function openGearDevice(key: string) {
+  devicesHomeScrollY = window.scrollY
+  gearDeviceKey.value = key
+  void startGear()
+  void restoreScroll(0)
+}
+
+function backToGearHome() {
+  deviceDetailScrollY = window.scrollY
+  gearDeviceKey.value = null
+  void startGear()
+  void restoreScroll(devicesHomeScrollY)
+}
+
+/**
+ * 设备库页面的卡片高度依赖快照/相册列表，恢复滚动要等 DOM 更新；
+ * 下一帧再校正一次，避免被尚未渲染完的网格高度钳制。
+ */
+async function restoreScroll(target: number) {
+  await nextTick()
+  window.scrollTo(0, target)
+  requestAnimationFrame(() => window.scrollTo(0, target))
 }
 
 async function handleRemove(album: Album) {
@@ -531,7 +888,7 @@ function applyPhotosUpdate(nextPhotos: Photo[]) {
     .map((group) => ({ photoIds: group.photoIds.filter((id) => valid.has(id)) }))
     .filter((group) => group.photoIds.length >= 2)
 
-  if (similarEnabled.value) {
+  if (similarEnabled.value && !favoritesOnly.value) {
     scheduleSimilarRestart()
   } else {
     similarAlbumComplete.value = false
@@ -569,8 +926,12 @@ function closeViewer() {
 onMounted(() => {
   window.api.onPhotosUpdated(handlePhotosUpdated)
   window.api.onSimilarSnapshot(handleSimilarSnapshot)
+  subscribeGear()
   // 首页只显示相册封面
   void window.api.setThumbnailScope(null).catch(() => undefined)
+  void loadFavorites()
   void loadAlbums()
+  // 上次停留在设备视图时直接恢复扫描，无需用户再切换
+  if (homeView.value === 'devices') void startGear()
 })
 </script>

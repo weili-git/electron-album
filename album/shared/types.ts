@@ -99,6 +99,68 @@ export interface AlbumStatsProgress {
   total: number
 }
 
+/** 拍摄设备库：单个相册的参考设备结论 */
+export interface GearAlbumInfo {
+  albumId: string
+  /** 相册照片总数，设备张数为各相册张数之和（按相册归属估算） */
+  photoCount: number
+  /** 样本中的主机身 key；未识别时为 null */
+  cameraKey: string | null
+  cameraName: string | null
+  /** 样本中的机身分布，label 为展示名 */
+  cameras: StatsBucket[]
+  /** 样本里出现多于一台机身 */
+  mixed: boolean
+  /** 实际读取的参考照片数 */
+  sampleCount: number
+  /** 其中带机身信息的数量 */
+  sampleWithCamera: number
+  /** 合并参考样本与相似分析已读照片后最常见的镜头 */
+  referenceLens: string | null
+  /** 镜头信息覆盖的照片数（参考样本 + 相似分析已读取），不是整本相册 */
+  lensPhotoCount: number
+  /** 样本中最新一张的文件创建时间，用于选设备封面 */
+  latestSampleAt: number | null
+}
+
+/** 拍摄设备库中的一台机身 */
+export interface GearDevice {
+  key: string
+  name: string
+  /** 归属该机身的相册 id */
+  albumIds: string[]
+  albumCount: number
+  /** 归属相册张数之和，按相册归属估算 */
+  photoCount: number
+  /** 代表性相册 id，封面取它的 coverThumbs[0] */
+  coverAlbumId: string | null
+  /** 按已读取照片数排序的镜头，最多 12 支（UI 默认展示前 2 支，其余折叠） */
+  referenceLenses: StatsBucket[]
+  /** 镜头信息覆盖的照片数，随相册浏览逐步增加 */
+  lensPhotoCount: number
+  /** 该设备下参考样本总数 */
+  sampleCount: number
+  /** 其中有设备信息的样本数 */
+  sampleWithCamera: number
+  /** 含混合样本的相册数 */
+  mixedAlbumCount: number
+}
+
+/** 设备库扫描快照；分析过程中会多次推送 */
+export interface GearSnapshot {
+  /** 已检查相册的参考结论（不含空相册） */
+  albums: GearAlbumInfo[]
+  cameras: GearDevice[]
+  /** 参考样本没有机身信息的相册 */
+  unknownAlbumIds: string[]
+  /** 目录不可用而跳过的相册 */
+  missingAlbumIds: string[]
+  checkedAlbums: number
+  totalAlbums: number
+  scanning: boolean
+  error: string | null
+}
+
 /** 一组视觉上相似的照片（至少两张） */
 export interface SimilarGroup {
   /** 组内照片 id，按相册默认顺序（创建时间倒序）排列 */
@@ -154,6 +216,16 @@ export interface AlbumApi {
   onSimilarSnapshot(callback: (event: SimilarSnapshot) => void): void
   /** 按需读取照片详情；照片已不在登记表中时返回 null */
   getPhotoDetails(photoId: string): Promise<PhotoDetails | null>
+  /** 读取全部收藏照片的 id（只写应用数据，不修改照片文件） */
+  listFavorites(): Promise<string[]>
+  /** 批量设置收藏状态；返回更新后的全部收藏 id */
+  setFavorites(photoIds: string[], favorite: boolean): Promise<string[]>
+  /** 开始或继续设备库扫描；按相册前几张参考照片归类 */
+  startGearScan(refresh?: boolean): Promise<void>
+  /** 暂停设备库扫描并保存已完成的相册样本 */
+  pauseGearScan(): Promise<void>
+  /** 订阅设备库快照；同一时间只保留一个订阅 */
+  onGearSnapshot(callback: (event: GearSnapshot) => void): void
   /** 订阅后台扫描结果；同一时间只保留一个订阅 */
   onPhotosUpdated(callback: (event: PhotosUpdatedEvent) => void): void
 }
